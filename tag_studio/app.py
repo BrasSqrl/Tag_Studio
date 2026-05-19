@@ -28,6 +28,7 @@ from tag_studio.document_intelligence import (
 from tag_studio.exporters import export_excel, export_jsonl, export_memo_bundle
 from tag_studio.extraction import tesseract_available
 from tag_studio.models import EvidenceRecord, SectionDefinition, TagDefinition, TagRecord, utc_now
+from tag_studio.schema_workbook import create_tag_setup_workbook, import_tag_setup_workbook
 from tag_studio.sectioning import propose_section_candidates, propose_sections, required_section_gaps
 from tag_studio.storage import (
     DEFAULT_WORKSPACE,
@@ -1271,12 +1272,110 @@ def download_results_page(workspace: Path, memo_id: str | None) -> None:
             st.download_button("Download Audit Package", data=audit_path.read_bytes(), file_name=audit_path.name)
 
 
+def schema_usage_warnings(
+    workspace: Path,
+    previous_sections: list[SectionDefinition],
+    previous_tags: list[TagDefinition],
+    new_sections: list[SectionDefinition] | None,
+    new_tags: list[TagDefinition] | None,
+) -> list[str]:
+    warnings: list[str] = []
+    if new_sections is not None:
+        removed_sections = {section.section_id for section in previous_sections} - {section.section_id for section in new_sections}
+        if removed_sections:
+            used_sections: set[str] = set()
+            for memo_id in list_memo_ids(workspace):
+                used_sections.update(str(section.get("canonical_section_id", "")) for section in load_sections(workspace, memo_id))
+            affected = sorted(removed_sections & used_sections)
+            if affected:
+                warnings.append(
+                    "Removed section ID(s) are already used in saved memo records: "
+                    + ", ".join(affected)
+                    + ". Keep stable IDs whenever possible."
+                )
+    if new_tags is not None:
+        removed_tags = {tag.tag_id for tag in previous_tags} - {tag.tag_id for tag in new_tags}
+        if removed_tags:
+            used_tags: set[str] = set()
+            for memo_id in list_memo_ids(workspace):
+                used_tags.update(str(tag.get("tag_id", "")) for tag in load_tags(workspace, memo_id))
+            affected = sorted(removed_tags & used_tags)
+            if affected:
+                warnings.append(
+                    "Removed tag ID(s) are already used in saved memo records: "
+                    + ", ".join(affected)
+                    + ". Existing tags remain stored, but comparability is cleaner when IDs stay stable."
+                )
+    return warnings
+
+
 def schema_page(workspace: Path) -> None:
     st.subheader("Tag Setup")
     st.caption("Admin tool for standard sections and tag fields.")
 
     section_defs = load_section_defs(workspace)
     tag_defs = load_tag_defs(workspace)
+    import_message = st.session_state.pop("tag_setup_import_message", "")
+    import_warning_messages = st.session_state.pop("tag_setup_import_warnings", [])
+    if import_message:
+        st.success(import_message)
+    for warning in import_warning_messages:
+        st.warning(warning)
+
+    st.markdown("##### Excel Template Update")
+    st.caption("Download the current setup, edit it in Excel, then upload it back to update sections and tags in bulk.")
+    st.download_button(
+        "Download Tag Setup Template",
+        data=create_tag_setup_workbook(section_defs, tag_defs),
+        file_name="tag_studio_tag_setup_template.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        help="Download the current standard memo sections and credit tags as an editable Excel workbook.",
+    )
+    uploaded_setup = st.file_uploader(
+        "Upload edited tag setup workbook",
+        type=["xlsx"],
+        key="tag_setup_workbook_upload",
+        help="Upload the edited template. Keep the sheet names and header rows unchanged.",
+    )
+    update_col1, update_col2, update_col3 = st.columns([1, 1, 1.2])
+    with update_col1:
+        update_sections = st.checkbox("Update Standard Memo Sections", value=True)
+    with update_col2:
+        update_tags = st.checkbox("Update Credit Tags", value=True)
+    with update_col3:
+        apply_setup = st.button(
+            "Apply Uploaded Tag Setup",
+            type="primary",
+            disabled=uploaded_setup is None,
+            help="Replace the selected setup areas with values from the uploaded workbook.",
+        )
+
+    if apply_setup:
+        if not update_sections and not update_tags:
+            st.error("Choose at least one setup area to update.")
+        elif uploaded_setup is None:
+            st.error("Upload an edited tag setup workbook first.")
+        else:
+            try:
+                imported = import_tag_setup_workbook(
+                    uploaded_setup.getvalue(),
+                    section_defs,
+                    tag_defs,
+                    update_sections=update_sections,
+                    update_tags=update_tags,
+                )
+                import_warnings = schema_usage_warnings(workspace, section_defs, tag_defs, imported.sections, imported.tags)
+                if imported.sections is not None:
+                    save_section_defs(workspace, imported.sections)
+                    section_defs = imported.sections
+                if imported.tags is not None:
+                    save_tag_defs(workspace, imported.tags)
+                    tag_defs = imported.tags
+                st.session_state["tag_setup_import_message"] = f"Tag setup updated. Sections: {len(section_defs)}. Credit tags: {len(tag_defs)}."
+                st.session_state["tag_setup_import_warnings"] = [*imported.warnings, *import_warnings]
+                st.rerun()
+            except Exception as exc:  # noqa: BLE001 - convert workbook errors to admin-facing guidance.
+                st.error(f"Tag setup workbook could not be applied: {exc}")
 
     tab_sections, tab_tags = st.tabs(["Standard Memo Sections", "Credit Tags"])
     with tab_sections:
@@ -1286,8 +1385,11 @@ def schema_page(workspace: Path) -> None:
                 "display_name": definition.display_name,
                 "description": definition.description,
                 "required": definition.required,
+                "memo_types": "; ".join(definition.memo_types),
+                "facility_types": "; ".join(definition.facility_types),
                 "aliases": "; ".join(definition.aliases),
                 "expected_tag_ids": "; ".join(definition.expected_tag_ids),
+                "evidence_required": definition.evidence_required,
                 "display_order": definition.display_order,
             }
             for definition in section_defs
@@ -1304,8 +1406,11 @@ def schema_page(workspace: Path) -> None:
                         display_name=str(row.get("display_name") or row["section_id"]),
                         description=str(row.get("description") or ""),
                         required=bool(row.get("required")),
+                        memo_types=[item.strip() for item in str(row.get("memo_types", "")).split(";") if item.strip()],
+                        facility_types=[item.strip() for item in str(row.get("facility_types", "")).split(";") if item.strip()],
                         aliases=[item.strip() for item in str(row.get("aliases", "")).split(";") if item.strip()],
                         expected_tag_ids=[slugify(item.strip()) for item in str(row.get("expected_tag_ids", "")).split(";") if item.strip()],
+                        evidence_required=bool(row.get("evidence_required")),
                         display_order=int(row.get("display_order") or 100),
                     )
                 )
@@ -1322,6 +1427,7 @@ def schema_page(workspace: Path) -> None:
                 "allowed_values": "; ".join(definition.allowed_values),
                 "required": definition.required,
                 "evidence_required": definition.evidence_required,
+                "scoring_use": definition.scoring_use,
                 "export_use": definition.export_use,
                 "help_text": definition.help_text,
             }
@@ -1348,6 +1454,7 @@ def schema_page(workspace: Path) -> None:
                         allowed_values=[item.strip() for item in str(row.get("allowed_values", "")).split(";") if item.strip()],
                         required=bool(row.get("required")),
                         evidence_required=bool(row.get("evidence_required")),
+                        scoring_use=str(row.get("scoring_use") or ""),
                         export_use=export_use,  # type: ignore[arg-type]
                         help_text=str(row.get("help_text") or ""),
                     )

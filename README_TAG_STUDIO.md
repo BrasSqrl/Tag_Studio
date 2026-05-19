@@ -30,6 +30,7 @@ python -m streamlit run tag_studio\app.py
 - Lets users tag section text, select evidence lines, correct OCR snippets, and submit for review.
 - Supports reviewer approval to create `Approved Gold` records.
 - Exports Excel and JSONL files for tuning workflows.
+- Lets admins download the section/tag setup as an Excel template, edit it in bulk, and upload it back through Admin Tools.
 
 ## Local Workspace
 

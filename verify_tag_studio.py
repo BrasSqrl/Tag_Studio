@@ -10,6 +10,7 @@ from tag_studio.defaults import SCHEMA_VERSION
 from tag_studio.document_intelligence import run_document_intelligence
 from tag_studio.exporters import export_excel, export_jsonl
 from tag_studio.models import EvidenceRecord, ReviewRecord, TagRecord
+from tag_studio.schema_workbook import create_tag_setup_workbook, import_tag_setup_workbook
 from tag_studio.sectioning import propose_sections
 from tag_studio.storage import (
     create_memo_workspace,
@@ -67,6 +68,23 @@ def main() -> None:
     from tag_studio.models import SectionDefinition
 
     definitions = [SectionDefinition(**item) for item in section_defs]
+    tag_defs = [item for item in read_json(workspace / "config" / "tag_schema.json", [])]
+    from tag_studio.models import TagDefinition
+
+    tag_definitions = [TagDefinition(**item) for item in tag_defs]
+    setup_template = create_tag_setup_workbook(definitions, tag_definitions)
+    imported_setup = import_tag_setup_workbook(
+        setup_template,
+        definitions,
+        tag_definitions,
+        update_sections=True,
+        update_tags=True,
+    )
+    if imported_setup.section_count != len(definitions):
+        raise AssertionError("Tag setup template section import did not round-trip.")
+    if imported_setup.tag_count != len(tag_definitions):
+        raise AssertionError("Tag setup template tag import did not round-trip.")
+
     intelligence = run_document_intelligence(workspace, memo.memo_id, definitions)
     pages = intelligence["pages"]
     method = intelligence["method"]
