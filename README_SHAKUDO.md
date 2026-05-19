@@ -54,6 +54,8 @@ For digital PDFs, Python dependencies are enough. For scanned PDFs, the Shakudo 
 
 If the base Shakudo environment does not include these, create an environment config or custom image before production use.
 
+Technical note: this requirement is for Tag Studio's current local OCR path. Amazon Textract is AWS's managed document-analysis service, but Tag Studio does not call Textract in the current Shakudo deployment plan.
+
 ## How Storage Works
 
 S3 object keys mirror the local workspace layout:

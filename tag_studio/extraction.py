@@ -89,7 +89,7 @@ def ocr_images(image_paths: list[Path]) -> list[PageText]:
     except ImportError as exc:
         raise RuntimeError("pytesseract is required for OCR. Install with: pip install pytesseract") from exc
     if not tesseract_available():
-        raise RuntimeError("The Tesseract OCR engine is not installed or is not on PATH.")
+        raise RuntimeError("Local scanned-PDF reading support is not installed or is not on PATH.")
 
     pages: list[PageText] = []
     for index, image_path in enumerate(image_paths, start=1):
@@ -117,5 +117,5 @@ def extract_pdf(pdf_path: Path, pages_dir: Path, force_ocr: bool = False) -> tup
         fallback_pages = extract_embedded_text(pdf_path)
         warning = str(exc)
         if not any(page.text for page in fallback_pages):
-            warning += " No embedded text was found; use manual correction or install Tesseract."
+            warning += " No embedded text was found; use manual correction or configure local OCR support."
         return fallback_pages, rendered, "manual_correction", warning

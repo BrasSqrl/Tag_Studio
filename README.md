@@ -24,7 +24,7 @@ The first launch may take a few minutes while Tag Studio sets itself up. After t
 ## Notes
 
 - Digital PDFs are extracted locally with PyMuPDF.
-- Scanned PDFs need local OCR support installed on the computer. Tag Studio will warn you if Tesseract is missing.
+- Scanned PDFs need local OCR support installed on the computer. Tag Studio will warn you if scanned-PDF reading support is missing.
 - Messy pages are flagged for human review before section tagging starts.
 - Downloads are generated as a Review Workbook, Training File, and Audit Package.
 - Local work is stored in `tag_studio_workspace/`, which is ignored by Git.

@@ -376,7 +376,7 @@ def extraction_message(method: str, warning: str | None, page_count: int) -> Non
     if warning:
         st.warning("Some pages may need review. Check extracted text before confirming memo sections.")
     elif method == "manual_correction":
-        st.warning("Could not read scanned text. Install OCR support or correct the text manually.")
+        st.warning("Could not read scanned text. Add local scanned-PDF reading support or correct the text manually.")
     else:
         st.success(f"Text read successfully from {page_count} page(s).")
 
@@ -453,8 +453,8 @@ def add_memo_page(workspace: Path) -> None:
     deps = dependency_status()
     if not deps.get("tesseract"):
         st.warning(
-            "Scanned memo setup is incomplete. Digital PDFs can still be read, but scanned PDFs need the Tesseract OCR engine "
-            "before Tag Studio can reliably read page images."
+            "Scanned memo setup is incomplete. Digital PDFs can still be read, but scanned PDFs may need local OCR support "
+            "or manual text correction before Tag Studio can reliably read page images."
         )
     with st.form("add_memo_form"):
         uploaded = st.file_uploader(
@@ -571,7 +571,7 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
         ("Pages", summary["page_count"]),
         ("Average Read Quality", f"{int(summary['average_score'] * 100)}%"),
         ("Needs Review", summary["needs_review_count"]),
-        ("OCR Warnings", len([warning for warning in warnings if not warning.get("resolved")]))
+        ("Text Reading Warnings", len([warning for warning in warnings if not warning.get("resolved")]))
     ]
     for col, (label, value) in zip(cols, metrics):
         col.markdown(f'<div class="metric-card"><div class="label">{label}</div><div class="value">{value}</div></div>', unsafe_allow_html=True)
@@ -632,7 +632,7 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
     with right:
         st.markdown("##### Extracted Text")
         corrected_text = st.text_area(
-            "Correct this text if the page image shows OCR mistakes.",
+            "Correct this text if the page image shows text-reading mistakes.",
             value=selected_text.get("text", ""),
             height=500,
             key=f"quality_text_{memo_id}_{selected_page_number}",
@@ -1090,7 +1090,7 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
         and unreviewed_warning_pages
     ]
     if unreviewed_warnings:
-        findings.append(f"{len(unreviewed_warnings)} OCR warning(s) still need review.")
+        findings.append(f"{len(unreviewed_warnings)} text reading warning(s) still need review.")
 
     gaps = required_section_gaps(sections, section_defs, memo.get("memo_type", ""), memo.get("facility_type", ""))
     if gaps:
