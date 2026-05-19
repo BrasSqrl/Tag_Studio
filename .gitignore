@@ -5,3 +5,8 @@ __pycache__/
 .streamlit/
 tag_studio_workspace/
 tag_studio_test_workspace/
+CRAIG_credit_memo_llm_roadmap.docx
+CRAIG_credit_memo_tagging_blueprint.xlsx
+CRAIG_credit_memo_tagging_data_entry.xlsx
+CRAIG_executive_summary.docx
+CRAIG_sample_complete_tagged_memo.jsonl
