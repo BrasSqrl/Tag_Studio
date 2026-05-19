@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 
 ReviewStatus = Literal["Draft", "Ready for Review", "Changes Requested", "Approved Gold", "Exported"]
 ExtractionMethod = Literal["local_pdf_text", "local_ocr", "aws_textract_optional", "manual_correction"]
+PageQualityStatus = Literal["Ready", "Needs Review", "Hard to Read", "Possible Handwriting", "Table Heavy"]
+LayoutBlockType = Literal["heading", "paragraph", "table", "handwritten_note", "footer", "signature", "unknown"]
 
 
 def utc_now() -> str:
@@ -58,6 +60,53 @@ class PageText(BaseModel):
     text: str
     extraction_method: ExtractionMethod
     extraction_confidence: float | None = None
+
+
+class PageQualityRecord(BaseModel):
+    memo_id: str
+    page_number: int
+    status: PageQualityStatus
+    text_quality_score: float
+    extraction_method: ExtractionMethod
+    flags: list[str] = Field(default_factory=list)
+    reviewer_confirmed: bool = False
+    reviewer_notes: str = ""
+
+
+class LayoutBlockRecord(BaseModel):
+    block_id: str
+    memo_id: str
+    page_number: int
+    block_type: LayoutBlockType = "unknown"
+    text: str = ""
+    bbox: list[float] = Field(default_factory=list)
+    confidence: float | None = None
+    source: str = "local"
+    reading_order: int = 0
+
+
+class SectionCandidateRecord(BaseModel):
+    candidate_id: str
+    memo_id: str
+    original_heading: str
+    suggested_section_id: str
+    suggested_section_name: str
+    confidence: float
+    alternate_matches: list[dict[str, Any]] = Field(default_factory=list)
+    page_start: int
+    page_end: int
+    line_index: int = 0
+    reason: str = ""
+
+
+class ExtractionWarningRecord(BaseModel):
+    warning_id: str
+    memo_id: str
+    page_number: int | None = None
+    severity: Literal["Info", "Review", "Blocking"] = "Review"
+    message: str
+    action: str = ""
+    resolved: bool = False
 
 
 class SectionRecord(BaseModel):

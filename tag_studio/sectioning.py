@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from difflib import SequenceMatcher
 
-from .models import SectionDefinition, SectionRecord
+from .models import SectionCandidateRecord, SectionDefinition, SectionRecord
 
 
 HEADING_MAX_WORDS = 12
@@ -34,21 +34,76 @@ def heading_candidates(page_text: str) -> list[tuple[str, int]]:
 
 
 def match_section(header: str, definitions: list[SectionDefinition]) -> SectionDefinition | None:
+    ranked = ranked_section_matches(header, definitions)
+    if ranked and ranked[0][1] >= MATCH_THRESHOLD:
+        return ranked[0][0]
+    return None
+
+
+def ranked_section_matches(header: str, definitions: list[SectionDefinition], limit: int = 3) -> list[tuple[SectionDefinition, float, str]]:
     normalized = normalize_text(header)
-    best_score = 0.0
-    best: SectionDefinition | None = None
+    matches: list[tuple[SectionDefinition, float, str]] = []
     for definition in definitions:
         names = [definition.display_name, definition.section_id.replace("_", " "), *definition.aliases]
+        best_score = 0.0
+        best_reason = "similar wording"
         for name in names:
-            score = SequenceMatcher(None, normalized, normalize_text(name)).ratio()
-            if normalize_text(name) in normalized or normalized in normalize_text(name):
+            normalized_name = normalize_text(name)
+            score = SequenceMatcher(None, normalized, normalized_name).ratio()
+            reason = f"closest wording match is '{name}'"
+            if normalized_name in normalized or normalized in normalized_name:
                 score = max(score, 0.92)
+                reason = f"heading resembles '{name}'"
             if score > best_score:
                 best_score = score
-                best = definition
-    if best_score >= MATCH_THRESHOLD:
-        return best
-    return None
+                best_reason = reason
+        matches.append((definition, round(best_score, 3), best_reason))
+    return sorted(matches, key=lambda item: item[1], reverse=True)[:limit]
+
+
+def propose_section_candidates(
+    memo_id: str,
+    pages: list[dict],
+    definitions: list[SectionDefinition],
+) -> list[SectionCandidateRecord]:
+    candidates: list[SectionCandidateRecord] = []
+    seen = set()
+    for page in pages:
+        page_number = int(page.get("page_number", 1))
+        for header, line_idx in heading_candidates(page.get("text", "")):
+            ranked = ranked_section_matches(header, definitions)
+            if not ranked:
+                continue
+            best_definition, best_score, reason = ranked[0]
+            key = (page_number, line_idx, header.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            alternates = [
+                {
+                    "section_id": definition.section_id,
+                    "section_name": definition.display_name,
+                    "confidence": score,
+                    "reason": alt_reason,
+                }
+                for definition, score, alt_reason in ranked[1:]
+            ]
+            candidates.append(
+                SectionCandidateRecord(
+                    candidate_id=f"candidate_{len(candidates) + 1:03}",
+                    memo_id=memo_id,
+                    original_heading=header,
+                    suggested_section_id=best_definition.section_id,
+                    suggested_section_name=best_definition.display_name,
+                    confidence=best_score,
+                    alternate_matches=alternates,
+                    page_start=page_number,
+                    page_end=page_number,
+                    line_index=line_idx,
+                    reason=reason,
+                )
+            )
+    return candidates
 
 
 def _slice_section_text(

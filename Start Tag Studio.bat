@@ -32,9 +32,9 @@ if not exist ".venv\Scripts\python.exe" (
     )
 )
 
-".venv\Scripts\python.exe" -c "import streamlit" >nul 2>nul
+".venv\Scripts\python.exe" -c "import importlib.util, sys; required=['streamlit','pandas','openpyxl','pydantic','filelock','fitz','pytesseract','PIL','numpy','cv2','pypdfium2','ocrmypdf','paddleocr']; missing=[name for name in required if importlib.util.find_spec(name) is None]; sys.exit(1 if missing else 0)" >nul 2>nul
 if errorlevel 1 (
-    echo Installing Tag Studio components. This may take a few minutes.
+    echo Installing Tag Studio components. OCR/layout setup may take several minutes.
     ".venv\Scripts\python.exe" -m pip install --upgrade pip
     if errorlevel 1 (
         echo Tag Studio could not update its installer.
@@ -47,6 +47,15 @@ if errorlevel 1 (
         pause
         exit /b 1
     )
+)
+
+".venv\Scripts\python.exe" -c "from tag_studio.document_intelligence import dependency_status; import sys; status=dependency_status(); sys.exit(0 if status.get('tesseract') else 2)" >nul 2>nul
+if errorlevel 2 (
+    echo.
+    echo OCR setup notice:
+    echo Tesseract was not found on this computer.
+    echo Digital PDFs can still be read. Scanned PDFs will need Tesseract installed, or the extracted text must be corrected manually.
+    echo.
 )
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "try {$c=New-Object Net.Sockets.TcpClient; $c.Connect('127.0.0.1',8501); $c.Close(); exit 0} catch {exit 1}" >nul 2>nul

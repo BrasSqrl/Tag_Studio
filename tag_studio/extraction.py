@@ -37,6 +37,42 @@ def render_pdf_pages(pdf_path: Path, pages_dir: Path, zoom: float = 1.6) -> list
     return rendered
 
 
+def preprocess_image_for_ocr(image_path: Path) -> Path:
+    """Create a deskewed high-contrast OCR copy when OpenCV is available."""
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        return image_path
+
+    image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+    if image is None:
+        return image_path
+
+    denoised = cv2.fastNlMeansDenoising(image, None, 12, 7, 21)
+    thresholded = cv2.threshold(denoised, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+    coords = np.column_stack(np.where(thresholded < 255))
+    if coords.size:
+        angle = cv2.minAreaRect(coords)[-1]
+        angle = -(90 + angle) if angle < -45 else -angle
+        if 0.5 <= abs(angle) <= 12:
+            height, width = thresholded.shape[:2]
+            matrix = cv2.getRotationMatrix2D((width // 2, height // 2), angle, 1.0)
+            thresholded = cv2.warpAffine(
+                thresholded,
+                matrix,
+                (width, height),
+                flags=cv2.INTER_CUBIC,
+                borderMode=cv2.BORDER_REPLICATE,
+            )
+
+    output_dir = image_path.parent / "ocr_preprocessed"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / image_path.name
+    cv2.imwrite(str(output_path), thresholded)
+    return output_path
+
+
 def extract_embedded_text(pdf_path: Path) -> list[PageText]:
     fitz = _require_fitz()
     pages: list[PageText] = []
@@ -57,7 +93,8 @@ def ocr_images(image_paths: list[Path]) -> list[PageText]:
 
     pages: list[PageText] = []
     for index, image_path in enumerate(image_paths, start=1):
-        with Image.open(image_path) as image:
+        ocr_path = preprocess_image_for_ocr(image_path)
+        with Image.open(ocr_path) as image:
             text = pytesseract.image_to_string(image).strip()
         pages.append(PageText(page_number=index, text=text, extraction_method="local_ocr"))
     return pages

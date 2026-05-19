@@ -7,8 +7,8 @@ from pathlib import Path
 import fitz  # type: ignore
 
 from tag_studio.defaults import SCHEMA_VERSION
+from tag_studio.document_intelligence import run_document_intelligence
 from tag_studio.exporters import export_excel, export_jsonl
-from tag_studio.extraction import extract_pdf
 from tag_studio.models import EvidenceRecord, ReviewRecord, TagRecord
 from tag_studio.sectioning import propose_sections
 from tag_studio.storage import (
@@ -63,17 +63,22 @@ def main() -> None:
     )
 
     base = memo_dir(workspace, memo.memo_id)
-    pages, _images, method, warning = extract_pdf(base / "source" / "source.pdf", base / "pages")
+    section_defs = [item for item in read_json(workspace / "config" / "section_schema.json", [])]
+    from tag_studio.models import SectionDefinition
+
+    definitions = [SectionDefinition(**item) for item in section_defs]
+    intelligence = run_document_intelligence(workspace, memo.memo_id, definitions)
+    pages = intelligence["pages"]
+    method = intelligence["method"]
+    warning = intelligence["warning"]
     if warning:
         raise AssertionError(warning)
     page_dicts = [page.model_dump() for page in pages]
-    section_defs = [item for item in read_json(workspace / "config" / "section_schema.json", [])]
-    from tag_studio.models import SectionDefinition
 
     sections = propose_sections(
         memo_id=memo.memo_id,
         pages=page_dicts,
-        definitions=[SectionDefinition(**item) for item in section_defs],
+        definitions=definitions,
         extraction_method=method,
     )
     saved_sections = [section.model_dump() for section in sections]
@@ -110,6 +115,19 @@ def main() -> None:
     save_tags(workspace, memo.memo_id, [tag.model_dump()])
     save_review(workspace, memo.memo_id, ReviewRecord(memo_id=memo.memo_id, status="Approved Gold", reviewer="tester", adjudicator="tester").model_dump())
 
+    for relative_path in [
+        "extraction/page_text.json",
+        "extraction/page_quality.json",
+        "extraction/layout_blocks.json",
+        "extraction/reading_order.json",
+        "extraction/ocr_warnings.json",
+        "sections/section_candidates.json",
+    ]:
+        artifact = base / relative_path
+        if not artifact.exists():
+            raise AssertionError(f"Expected extraction artifact missing: {relative_path}")
+        json.loads(artifact.read_text(encoding="utf-8"))
+
     excel_path = export_excel(workspace, include_only_approved=True)
     jsonl_paths = export_jsonl(workspace, include_only_approved=True)
 
@@ -119,7 +137,9 @@ def main() -> None:
         if not path.exists():
             raise AssertionError(f"{label} JSONL export was not created.")
         for line in path.read_text(encoding="utf-8").splitlines():
-            json.loads(line)
+            record = json.loads(line)
+            if "response" in record:
+                json.loads(record["response"])
 
     assert load_sections(workspace, memo.memo_id), "Sections were not saved."
     assert load_tags(workspace, memo.memo_id), "Tags were not saved."

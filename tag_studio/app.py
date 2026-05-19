@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from html import escape
 from pathlib import Path
 from uuid import uuid4
 
@@ -11,10 +12,21 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from tag_studio.defaults import DEFAULT_FACILITY_TYPES, DEFAULT_MEMO_TYPES, SCHEMA_VERSION
+from tag_studio.document_intelligence import (
+    dependency_status,
+    load_extraction_warnings,
+    load_page_quality,
+    load_page_text,
+    load_section_candidates,
+    run_document_intelligence,
+    save_page_quality,
+    save_page_text,
+    summarize_page_quality,
+)
 from tag_studio.exporters import export_excel, export_jsonl, export_memo_bundle
-from tag_studio.extraction import extract_pdf, tesseract_available
+from tag_studio.extraction import tesseract_available
 from tag_studio.models import EvidenceRecord, SectionDefinition, TagDefinition, TagRecord, utc_now
-from tag_studio.sectioning import propose_sections, required_section_gaps
+from tag_studio.sectioning import propose_section_candidates, propose_sections, required_section_gaps
 from tag_studio.storage import (
     DEFAULT_WORKSPACE,
     append_audit,
@@ -44,6 +56,7 @@ st.set_page_config(page_title="Tag Studio", page_icon="TS", layout="wide")
 
 WIZARD_STEPS = [
     "Add Memo",
+    "Review Text Quality",
     "Confirm Sections",
     "Tag Credit Review",
     "Quality Check",
@@ -96,7 +109,7 @@ body { background: #f6f8fb; }
 .tag-title p { margin: .35rem 0 0 0; color: #dcebf5; }
 .progress-wrap {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: .65rem;
   margin: .8rem 0 1.1rem 0;
 }
@@ -109,6 +122,7 @@ body { background: #f6f8fb; }
 }
 .step-card.complete { border-color: #7bb38b; background: #f2faf4; }
 .step-card.active { border-color: #2f6975; box-shadow: 0 0 0 2px rgba(47,105,117,.14); }
+.step-card.needs { border-color: #e1a640; background: #fff8e8; }
 .step-num { color: #617083; font-size: .76rem; text-transform: uppercase; }
 .step-name { color: #172333; font-weight: 720; margin-top: .18rem; }
 .step-state { color: #546376; font-size: .82rem; margin-top: .24rem; }
@@ -142,6 +156,32 @@ body { background: #f6f8fb; }
   color: #17324d;
   font-size: .82rem;
   font-weight: 650;
+}
+.status-ready { background: #e7f7ed; color: #176b3a; }
+.status-review { background: #fff3cf; color: #7a4c00; }
+.status-hard { background: #ffe4e4; color: #9b1c1c; }
+.status-blue { background: #e8f1ff; color: #1c4f8f; }
+.quality-card {
+  border: 1px solid #dbe4ed;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: .75rem;
+  min-height: 122px;
+  margin-bottom: .5rem;
+}
+.quality-card.active { border-color: #2f6975; box-shadow: 0 0 0 2px rgba(47,105,117,.12); }
+.page-thumb {
+  border: 1px solid #d8e2ec;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: .45rem;
+}
+.section-suggestion {
+  border-left: 4px solid #3b82f6;
+  background: #f5f9ff;
+  padding: .55rem .75rem;
+  border-radius: 6px;
+  margin: .35rem 0 .6rem 0;
 }
 .small-muted { color: #637083; font-size: .88rem; }
 </style>
@@ -217,6 +257,7 @@ def step_summary(workspace: Path, memo_id: str | None) -> dict[str, str]:
     if not memo_id:
         return {
             "Add Memo": "Needs Review",
+            "Review Text Quality": "Not Started",
             "Confirm Sections": "Not Started",
             "Tag Credit Review": "Not Started",
             "Quality Check": "Not Started",
@@ -230,6 +271,7 @@ def step_summary(workspace: Path, memo_id: str | None) -> dict[str, str]:
     section_defs = load_section_defs(workspace)
     gaps = required_section_gaps(sections, section_defs, memo.get("memo_type", ""), memo.get("facility_type", ""))
 
+    quality_complete = text_quality_complete(workspace, memo_id)
     sections_complete = bool(sections) and not gaps and all(section.get("reviewer_confirmed") for section in sections)
     tags_complete = bool(tags) and any(tag.get("evidence_ids") for tag in tags)
     approved = review.get("status") == "Approved Gold"
@@ -237,7 +279,8 @@ def step_summary(workspace: Path, memo_id: str | None) -> dict[str, str]:
 
     return {
         "Add Memo": "Complete",
-        "Confirm Sections": "Complete" if sections_complete else "Needs Review",
+        "Review Text Quality": "Complete" if quality_complete else "Needs Review",
+        "Confirm Sections": "Complete" if sections_complete else ("Needs Review" if quality_complete else "Not Started"),
         "Tag Credit Review": "Complete" if tags_complete else ("Needs Review" if sections_complete else "Not Started"),
         "Quality Check": "Complete" if approved else ("Needs Review" if tags_complete else "Not Started"),
         "Download Results": "Complete" if exported else ("Needs Review" if approved else "Not Started"),
@@ -251,6 +294,8 @@ def show_progress(current_step: str, statuses: dict[str, str]) -> None:
         cls = "step-card"
         if status == "Complete":
             cls += " complete"
+        elif status == "Needs Review":
+            cls += " needs"
         if step == current_step:
             cls += " active"
         cards.append(
@@ -276,11 +321,64 @@ def blocked_step(message: str, next_step: str) -> None:
 
 def extraction_message(method: str, warning: str | None, page_count: int) -> None:
     if warning:
-        st.warning("Some pages may need review. If scanned text was not read correctly, install OCR support or correct the text in Confirm Sections.")
+        st.warning("Some pages may need review. Check extracted text before confirming memo sections.")
     elif method == "manual_correction":
         st.warning("Could not read scanned text. Install OCR support or correct the text manually.")
     else:
         st.success(f"Text read successfully from {page_count} page(s).")
+
+
+def status_class(status: str) -> str:
+    if status == "Ready":
+        return "status-ready"
+    if status == "Hard to Read":
+        return "status-hard"
+    if status in {"Possible Handwriting", "Table Heavy"}:
+        return "status-blue"
+    return "status-review"
+
+
+def badge(label: str, status: str) -> str:
+    return f'<span class="status-pill {status_class(status)}">{label}</span>'
+
+
+def text_quality_complete(workspace: Path, memo_id: str) -> bool:
+    page_quality = load_page_quality(workspace, memo_id)
+    return bool(page_quality) and all(record.get("reviewer_confirmed") or record.get("status") == "Ready" for record in page_quality)
+
+
+def candidate_for_section(section: dict, candidates: list[dict]) -> dict | None:
+    original_header = str(section.get("original_header", "")).strip().lower()
+    page_start = int(section.get("page_start", 1))
+    matching = [
+        candidate
+        for candidate in candidates
+        if str(candidate.get("original_heading", "")).strip().lower() == original_header
+        and int(candidate.get("page_start", 1)) == page_start
+    ]
+    if not matching:
+        matching = [
+            candidate
+            for candidate in candidates
+            if str(candidate.get("original_heading", "")).strip().lower() == original_header
+        ]
+    if not matching:
+        return None
+    return sorted(matching, key=lambda item: float(item.get("confidence", 0)), reverse=True)[0]
+
+
+def rebuild_sections_from_page_text(workspace: Path, memo_id: str, extraction_method: str) -> None:
+    pages = load_page_text(workspace, memo_id)
+    definitions = load_section_defs(workspace)
+    proposed = propose_sections(
+        memo_id=memo_id,
+        pages=pages,
+        definitions=definitions,
+        extraction_method=extraction_method,
+    )
+    save_sections(workspace, memo_id, [section.model_dump() for section in proposed])
+    candidates = propose_section_candidates(memo_id, pages, definitions)
+    write_json(memo_dir(workspace, memo_id) / "sections" / "section_candidates.json", [candidate.model_dump() for candidate in candidates])
 
 
 def add_memo_page(workspace: Path) -> None:
@@ -299,6 +397,12 @@ def add_memo_page(workspace: Path) -> None:
         st.session_state["active_memo_id"] = active
 
     st.markdown("##### Add a New Credit Memo")
+    deps = dependency_status()
+    if not deps.get("tesseract"):
+        st.warning(
+            "Scanned memo setup is incomplete. Digital PDFs can still be read, but scanned PDFs need the Tesseract OCR engine "
+            "before Tag Studio can reliably read page images."
+        )
     with st.form("add_memo_form"):
         uploaded = st.file_uploader("Credit memo PDF", type=["pdf"])
         borrower = st.text_input("Borrower name or internal borrower ID")
@@ -328,26 +432,17 @@ def add_memo_page(workspace: Path) -> None:
         reviewer=reviewer,
     )
 
-    base = memo_dir(workspace, memo_id)
     with st.spinner("Reading memo text..."):
         try:
-            page_text, rendered_paths, method, warning = extract_pdf(base / "source" / "source.pdf", base / "pages")
+            intelligence = run_document_intelligence(workspace, memo_id, load_section_defs(workspace))
         except Exception as exc:  # noqa: BLE001 - show a friendly error in the UI.
             st.error("Tag Studio could not read this PDF. Confirm the file opens normally, then try again.")
             append_audit(workspace, memo_id, "extraction_failed", {"error": str(exc)})
             return
 
-        write_json(base / "extraction" / "page_text.json", [page.model_dump() for page in page_text])
-        write_json(
-            base / "extraction" / "extraction_summary.json",
-            {
-                "method": method,
-                "warning": warning,
-                "page_count": len(page_text),
-                "rendered_pages": [str(path) for path in rendered_paths],
-                "tesseract_available": tesseract_available(),
-            },
-        )
+        page_text = intelligence["pages"]
+        method = intelligence["method"]
+        warning = intelligence["warning"]
         memo_record = record.model_dump()
         memo_record["extraction_method"] = method
         save_memo_record(workspace, memo_id, memo_record)
@@ -362,8 +457,161 @@ def add_memo_page(workspace: Path) -> None:
 
     st.session_state["active_memo_id"] = memo_id
     extraction_message(method, warning, len(page_text))
-    st.session_state["selected_step"] = "Confirm Sections"
+    st.session_state["selected_step"] = "Review Text Quality"
     st.rerun()
+
+
+def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
+    st.subheader("Review Text Quality")
+    if not memo_id:
+        blocked_step("Add a memo before reviewing text quality.", "Add Memo")
+        return
+
+    memo = load_memo_record(workspace, memo_id)
+    page_quality = load_page_quality(workspace, memo_id)
+    page_text = load_page_text(workspace, memo_id)
+    warnings = load_extraction_warnings(workspace, memo_id)
+    if not page_quality or not page_text:
+        st.warning("This memo needs the new text-quality review files before it can continue.")
+        st.write("Use the button below to read the saved PDF again and create the page review workspace.")
+        if st.button("Create Text Quality Review", type="primary"):
+            with st.spinner("Reading the saved memo..."):
+                try:
+                    intelligence = run_document_intelligence(workspace, memo_id, load_section_defs(workspace))
+                except Exception as exc:  # noqa: BLE001 - keep the reviewer-facing message plain.
+                    st.error("Tag Studio could not read the saved PDF. Confirm the original PDF is still available in the memo workspace.")
+                    append_audit(workspace, memo_id, "text_quality_rebuild_failed", {"error": str(exc)})
+                    return
+                memo_record = memo.copy()
+                memo_record["extraction_method"] = intelligence["method"]
+                save_memo_record(workspace, memo_id, memo_record)
+                if not load_tags(workspace, memo_id):
+                    proposed = propose_sections(
+                        memo_id=memo_id,
+                        pages=[page.model_dump() for page in intelligence["pages"]],
+                        definitions=load_section_defs(workspace),
+                        extraction_method=intelligence["method"],
+                    )
+                    save_sections(workspace, memo_id, [section.model_dump() for section in proposed])
+                append_audit(workspace, memo_id, "text_quality_rebuilt", {"method": intelligence["method"]})
+                st.success("Text quality review files created.")
+                st.rerun()
+        return
+
+    summary = summarize_page_quality(page_quality)
+    cols = st.columns(4)
+    metrics = [
+        ("Pages", summary["page_count"]),
+        ("Average Read Quality", f"{int(summary['average_score'] * 100)}%"),
+        ("Needs Review", summary["needs_review_count"]),
+        ("OCR Warnings", len([warning for warning in warnings if not warning.get("resolved")]))
+    ]
+    for col, (label, value) in zip(cols, metrics):
+        col.markdown(f'<div class="metric-card"><div class="label">{label}</div><div class="value">{value}</div></div>', unsafe_allow_html=True)
+
+    if warnings:
+        st.markdown("##### Items to Check")
+        for warning in warnings[:6]:
+            severity = warning.get("severity", "Review")
+            status = "Hard to Read" if severity == "Blocking" else "Needs Review"
+            st.markdown(
+                f'<div class="section-suggestion">{badge(severity, status)} '
+                f'{warning.get("message", "")}<br><span class="small-muted">{warning.get("action", "")}</span></div>',
+                unsafe_allow_html=True,
+            )
+
+    selected_default = st.session_state.get(f"selected_quality_page_{memo_id}", 1)
+    page_numbers = [int(record["page_number"]) for record in page_quality]
+    if selected_default not in page_numbers:
+        selected_default = page_numbers[0]
+
+    st.markdown("##### Page Review")
+    thumb_cols = st.columns(min(4, max(1, len(page_quality))))
+    for idx, record in enumerate(page_quality):
+        page_number = int(record["page_number"])
+        active = page_number == selected_default
+        status = str(record.get("status", "Needs Review"))
+        with thumb_cols[idx % len(thumb_cols)]:
+            st.markdown(
+                f'<div class="quality-card {"active" if active else ""}">'
+                f'<b>Page {page_number}</b><br>{badge(status, status)}'
+                f'<div class="small-muted">Read quality: {int(float(record.get("text_quality_score", 0)) * 100)}%</div>'
+                f'<div class="small-muted">{"Reviewed" if record.get("reviewer_confirmed") else "Needs user check"}</div>'
+                "</div>",
+                unsafe_allow_html=True,
+            )
+            if st.button(f"Open Page {page_number}", key=f"open_quality_page_{memo_id}_{page_number}"):
+                st.session_state[f"selected_quality_page_{memo_id}"] = page_number
+                st.rerun()
+
+    selected_page_number = int(st.session_state.get(f"selected_quality_page_{memo_id}", selected_default))
+    selected_record = next(record for record in page_quality if int(record["page_number"]) == selected_page_number)
+    selected_text = next((record for record in page_text if int(record["page_number"]) == selected_page_number), {})
+
+    left, right = st.columns([1.05, 1.3])
+    with left:
+        st.markdown(f"##### Page {selected_page_number} Image")
+        image_path = memo_dir(workspace, memo_id) / "pages" / f"page_{selected_page_number:03}.png"
+        if image_path.exists():
+            st.image(str(image_path), width="stretch")
+        else:
+            st.info("Page image is not available.")
+        st.markdown(
+            f'{badge(str(selected_record.get("status", "Needs Review")), str(selected_record.get("status", "Needs Review")))} '
+            f'<span class="small-muted">Flags: {", ".join(selected_record.get("flags", [])) or "None"}</span>',
+            unsafe_allow_html=True,
+        )
+
+    with right:
+        st.markdown("##### Extracted Text")
+        corrected_text = st.text_area(
+            "Correct this text if the page image shows OCR mistakes.",
+            value=selected_text.get("text", ""),
+            height=500,
+            key=f"quality_text_{memo_id}_{selected_page_number}",
+        )
+        notes = st.text_area(
+            "Reviewer notes",
+            value=selected_record.get("reviewer_notes", ""),
+            height=90,
+            key=f"quality_notes_{memo_id}_{selected_page_number}",
+            help="Use this for handwriting, unreadable text, or table issues.",
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Save Page Review", type="primary"):
+                for record in page_text:
+                    if int(record["page_number"]) == selected_page_number:
+                        record["text"] = corrected_text
+                for record in page_quality:
+                    if int(record["page_number"]) == selected_page_number:
+                        record["reviewer_confirmed"] = True
+                        record["reviewer_notes"] = notes
+                        if record.get("status") == "Hard to Read" and corrected_text.strip():
+                            record["status"] = "Needs Review"
+                save_page_text(workspace, memo_id, page_text)
+                save_page_quality(workspace, memo_id, page_quality)
+                rebuild_sections_from_page_text(workspace, memo_id, memo.get("extraction_method", "manual_correction"))
+                append_audit(workspace, memo_id, "page_quality_review_saved", {"page_number": selected_page_number})
+                st.success("Page review saved.")
+                st.rerun()
+        with col2:
+            if st.button("Mark Page Reviewed"):
+                for record in page_quality:
+                    if int(record["page_number"]) == selected_page_number:
+                        record["reviewer_confirmed"] = True
+                save_page_quality(workspace, memo_id, page_quality)
+                append_audit(workspace, memo_id, "page_quality_marked_reviewed", {"page_number": selected_page_number})
+                st.rerun()
+
+    remaining = [record for record in load_page_quality(workspace, memo_id) if not record.get("reviewer_confirmed") and record.get("status") != "Ready"]
+    st.markdown("##### Next Action")
+    if remaining:
+        st.warning(f"{len(remaining)} page(s) still need review before sections are confirmed.")
+    else:
+        st.success("Text quality review is complete.")
+        if st.button("Continue to Confirm Sections", type="primary"):
+            go_to_step("Confirm Sections")
 
 
 def add_missing_required_sections(workspace: Path, memo_id: str) -> None:
@@ -418,6 +666,11 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
     section_defs = load_section_defs(workspace)
     definitions = {section.section_id: section for section in section_defs}
     section_options = list(definitions.keys())
+    candidates = load_section_candidates(workspace, memo_id)
+
+    if not text_quality_complete(workspace, memo_id):
+        blocked_step("Review the memo text quality before confirming sections.", "Review Text Quality")
+        return
 
     add_missing_required_sections(workspace, memo_id)
 
@@ -432,6 +685,24 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
             st.markdown('<div class="review-card">', unsafe_allow_html=True)
             st.markdown(f"**Original memo heading:** {section.get('original_header', 'Unlabeled section')}")
             st.caption(f"Pages {section.get('page_start')} to {section.get('page_end')}")
+            candidate = candidate_for_section(section, candidates)
+            if candidate:
+                alternates = candidate.get("alternate_matches", [])
+                alt_text = ""
+                if alternates:
+                    alt_text = " Alternate: " + ", ".join(
+                        f"{item.get('section_name')} ({int(float(item.get('confidence', 0)) * 100)}%)"
+                        for item in alternates[:2]
+                    )
+                st.markdown(
+                    '<div class="section-suggestion">'
+                    f'{badge("Suggestion", "Ready")} '
+                    f'{escape(str(candidate.get("suggested_section_name", "")))} '
+                    f'({int(float(candidate.get("confidence", 0)) * 100)}% confidence)<br>'
+                    f'<span class="small-muted">{escape(str(candidate.get("reason", "")))}{escape(alt_text)}</span>'
+                    "</div>",
+                    unsafe_allow_html=True,
+                )
             col1, col2 = st.columns([1.2, 1])
             with col1:
                 canonical_id = st.selectbox(
@@ -559,7 +830,7 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
         st.markdown("##### Memo Page")
         page_path = memo_dir(workspace, memo_id) / "pages" / f"page_{int(section.get('page_start', 1)):03}.png"
         if page_path.exists():
-            st.image(str(page_path), use_container_width=True)
+            st.image(str(page_path), width="stretch")
         else:
             st.info("Page image is not available.")
 
@@ -683,7 +954,7 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
             for tag in existing_section_tags
         ]
         st.markdown("##### Saved Tags for This Section")
-        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(display_rows), width="stretch", hide_index=True)
 
 
 def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str, int]]:
@@ -693,6 +964,43 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
     section_defs = load_section_defs(workspace)
     tags = load_tags(workspace, memo_id)
     evidence = load_evidence(workspace, memo_id)
+    page_quality = load_page_quality(workspace, memo_id)
+    warnings = load_extraction_warnings(workspace, memo_id)
+
+    if not page_quality:
+        findings.append("Text quality has not been reviewed.")
+    else:
+        unreviewed_pages = [
+            record
+            for record in page_quality
+            if record.get("status") != "Ready" and not record.get("reviewer_confirmed")
+        ]
+        hard_pages = [record for record in unreviewed_pages if record.get("status") == "Hard to Read"]
+        handwriting_pages = [record for record in unreviewed_pages if record.get("status") == "Possible Handwriting"]
+        if hard_pages:
+            findings.append("Hard-to-read pages still need review: " + ", ".join(f"p.{record.get('page_number')}" for record in hard_pages))
+        elif unreviewed_pages:
+            findings.append(f"{len(unreviewed_pages)} page(s) still need text quality review.")
+        if handwriting_pages:
+            findings.append("Possible handwritten or scribbled content needs human review: " + ", ".join(f"p.{record.get('page_number')}" for record in handwriting_pages))
+
+    unreviewed_warning_pages = {
+        int(record.get("page_number"))
+        for record in page_quality
+        if record.get("page_number") and record.get("status") != "Ready" and not record.get("reviewer_confirmed")
+    }
+    unreviewed_warnings = [
+        warning
+        for warning in warnings
+        if not warning.get("resolved")
+        and (
+            not warning.get("page_number")
+            or int(warning.get("page_number")) in unreviewed_warning_pages
+        )
+        and unreviewed_warning_pages
+    ]
+    if unreviewed_warnings:
+        findings.append(f"{len(unreviewed_warnings)} OCR warning(s) still need review.")
 
     gaps = required_section_gaps(sections, section_defs, memo.get("memo_type", ""), memo.get("facility_type", ""))
     if gaps:
@@ -712,6 +1020,28 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
 
     evidence_ids = {item.get("evidence_id") for item in evidence}
     tag_defs = {definition.tag_id: definition for definition in load_tag_defs(workspace)}
+    section_defs_by_key = {definition.section_id: definition for definition in section_defs}
+    missing_required_tags: list[str] = []
+    for section in sections:
+        if not section.get("reviewer_confirmed"):
+            continue
+        definition = section_defs_by_key.get(section.get("canonical_section_id"))
+        if not definition:
+            continue
+        saved_tag_ids = {
+            tag.get("tag_id")
+            for tag in tags
+            if tag.get("section_id") == section.get("section_id")
+        }
+        for expected_tag_id in definition.expected_tag_ids:
+            tag_definition = tag_defs.get(expected_tag_id)
+            if tag_definition and tag_definition.required and expected_tag_id not in saved_tag_ids:
+                missing_required_tags.append(f"{section.get('canonical_section_name')}: {tag_definition.label}")
+    if missing_required_tags:
+        sample = "; ".join(missing_required_tags[:8])
+        suffix = f" and {len(missing_required_tags) - 8} more" if len(missing_required_tags) > 8 else ""
+        findings.append(f"Missing required tags: {sample}{suffix}.")
+
     for tag in tags:
         definition = tag_defs.get(tag.get("tag_id"))
         if definition and definition.evidence_required and tag.get("value") not in {"Not addressed in memo", "Not applicable"} and not tag.get("evidence_ids"):
@@ -721,6 +1051,9 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
             findings.append(f"{tag.get('tag_label')} has missing evidence links.")
 
     metrics = {
+        "pages_total": len(page_quality),
+        "pages_checked": len([record for record in page_quality if record.get("status") == "Ready" or record.get("reviewer_confirmed")]),
+        "pages_need_review": len([record for record in page_quality if record.get("status") != "Ready" and not record.get("reviewer_confirmed")]),
         "sections_total": len(sections),
         "sections_confirmed": len([section for section in sections if section.get("reviewer_confirmed")]),
         "tags_total": len(tags),
@@ -738,10 +1071,11 @@ def quality_check_page(workspace: Path, memo_id: str | None) -> None:
     findings, metrics = quality_findings(workspace, memo_id)
     review = load_review(workspace, memo_id)
 
-    cols = st.columns(4)
+    cols = st.columns(5)
     for col, (label, value) in zip(
         cols,
         [
+            ("Pages Checked", f"{metrics['pages_checked']} / {metrics['pages_total']}"),
             ("Sections Confirmed", f"{metrics['sections_confirmed']} / {metrics['sections_total']}"),
             ("Saved Tags", metrics["tags_total"]),
             ("Evidence Items", metrics["evidence_total"]),
@@ -853,7 +1187,7 @@ def schema_page(workspace: Path) -> None:
             }
             for definition in section_defs
         ]
-        edited = st.data_editor(pd.DataFrame(rows), num_rows="dynamic", use_container_width=True, key="section_schema_editor")
+        edited = st.data_editor(pd.DataFrame(rows), num_rows="dynamic", width="stretch", key="section_schema_editor")
         if st.button("Save Standard Sections", type="primary"):
             new_sections = []
             for row in edited.fillna("").to_dict("records"):
@@ -888,7 +1222,7 @@ def schema_page(workspace: Path) -> None:
             }
             for definition in tag_defs
         ]
-        edited = st.data_editor(pd.DataFrame(rows), num_rows="dynamic", use_container_width=True, key="tag_schema_editor")
+        edited = st.data_editor(pd.DataFrame(rows), num_rows="dynamic", width="stretch", key="tag_schema_editor")
         if st.button("Save Credit Tags", type="primary"):
             new_tags = []
             for row in edited.fillna("").to_dict("records"):
@@ -924,6 +1258,7 @@ def diagnostics_page(workspace: Path) -> None:
             "workspace": str(workspace.resolve()),
             "schema_version": SCHEMA_VERSION,
             "tesseract_available": tesseract_available(),
+            "document_intelligence_dependencies": dependency_status(),
             "memo_count": len(list_memo_ids(workspace)),
             "section_schema": str(config_path(workspace, "section_schema.json")),
             "tag_schema": str(config_path(workspace, "tag_schema.json")),
@@ -981,6 +1316,8 @@ def main() -> None:
 
     if selected_step == "Add Memo":
         add_memo_page(workspace)
+    elif selected_step == "Review Text Quality":
+        review_text_quality_page(workspace, active_memo_id)
     elif selected_step == "Confirm Sections":
         confirm_sections_page(workspace, active_memo_id)
     elif selected_step == "Tag Credit Review":
