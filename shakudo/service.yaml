@@ -1,0 +1,19 @@
+# Shakudo Microservice definition for Tag Studio.
+# Configure the Shakudo service to run a single replica in v1.
+pipeline:
+  name: tag-studio
+  requirements: requirements.txt
+  tasks:
+    - name: Tag Studio
+      type: bash
+      port: 8787
+      script: shakudo/run.sh
+      env:
+        TAG_STUDIO_STORAGE_BACKEND: s3
+        TAG_STUDIO_LOCAL_WORKSPACE: /tmp/tag_studio_workspace
+        TAG_STUDIO_S3_PREFIX: tag-studio/prod
+        # Set these in Shakudo environment/secret configuration:
+        # TAG_STUDIO_S3_BUCKET: your-bucket-name
+        # AWS_REGION: us-east-1
+        # TAG_STUDIO_S3_SSE: aws:kms
+        # TAG_STUDIO_S3_KMS_KEY_ID: your-kms-key-id

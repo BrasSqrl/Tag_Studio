@@ -12,3 +12,4 @@ pypdfium2>=4.30
 ocrmypdf>=16.0
 paddleocr>=2.7
 paddlepaddle>=2.6; python_version < "3.13"
+boto3>=1.34

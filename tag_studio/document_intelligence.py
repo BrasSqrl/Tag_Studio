@@ -10,7 +10,7 @@ from PIL import Image, ImageStat
 from .extraction import extract_pdf, tesseract_available
 from .models import ExtractionWarningRecord, LayoutBlockRecord, PageQualityRecord, PageText
 from .sectioning import heading_candidates, propose_section_candidates
-from .storage import memo_dir, read_json, write_json
+from .storage import memo_dir, read_json, sync_path_to_remote, write_json
 
 
 def _optional_module_available(module_name: str) -> bool:
@@ -178,6 +178,7 @@ def run_document_intelligence(
 ) -> dict[str, Any]:
     base = memo_dir(workspace, memo_id)
     pages, rendered_paths, method, warning = extract_pdf(base / "source" / "source.pdf", base / "pages", force_ocr=force_ocr)
+    sync_path_to_remote(workspace, base / "pages")
     page_quality = build_page_quality(memo_id, pages, rendered_paths, method)
     layout_blocks = build_layout_blocks(memo_id, pages)
     section_candidates = propose_section_candidates(memo_id, [page.model_dump() for page in pages], definitions)

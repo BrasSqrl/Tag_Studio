@@ -17,6 +17,7 @@ from .storage import (
     load_tags,
     memo_dir,
     read_json,
+    sync_path_to_remote,
 )
 
 
@@ -121,6 +122,7 @@ def export_excel(workspace: Path, include_only_approved: bool = True) -> Path:
             max_len = max(len(str(cell.value or "")) for cell in column_cells)
             sheet.column_dimensions[get_column_letter(column_cells[0].column)].width = min(max(max_len + 2, 12), 50)
     workbook.save(path)
+    sync_path_to_remote(workspace, path)
     return path
 
 
@@ -264,6 +266,8 @@ def export_jsonl(workspace: Path, include_only_approved: bool = True) -> dict[st
                 + "\n"
             )
 
+    for path in [section_path, memo_path, audit_path]:
+        sync_path_to_remote(workspace, path)
     return {"sections": section_path, "memos": memo_path, "audit": audit_path}
 
 
@@ -283,4 +287,5 @@ def export_memo_bundle(workspace: Path, memo_id: str) -> Path:
         "extraction_warnings": read_json(memo_dir(workspace, memo_id) / "extraction" / "ocr_warnings.json", []),
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    sync_path_to_remote(workspace, path)
     return path

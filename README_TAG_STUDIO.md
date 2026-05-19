@@ -35,6 +35,8 @@ python -m streamlit run tag_studio\app.py
 
 The app stores data in `tag_studio_workspace/` by default. This folder is the local system of record.
 
+For hosted Shakudo deployments, Tag Studio can run with `TAG_STUDIO_STORAGE_BACKEND=s3`. In that mode, S3 is the durable system of record and the local workspace is only a working cache.
+
 ## OCR Note
 
 PyMuPDF and pytesseract are Python packages, but scanned-PDF OCR also requires the Tesseract desktop engine to be installed and available on `PATH`. If Tesseract is not installed, the app still works for digital PDFs and clearly marks scanned PDFs as needing OCR setup or manual correction.

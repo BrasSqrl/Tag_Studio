@@ -33,6 +33,7 @@ from tag_studio.storage import (
     config_path,
     create_memo_workspace,
     ensure_workspace,
+    hydrate_memo_from_remote,
     list_memo_ids,
     load_evidence,
     load_memo_record,
@@ -47,6 +48,8 @@ from tag_studio.storage import (
     save_sections,
     save_tags,
     slugify,
+    storage_readiness,
+    storage_status,
     write_json,
 )
 
@@ -219,6 +222,12 @@ def save_tag_defs(workspace: Path, tags: list[TagDefinition]) -> None:
 
 def get_workspace() -> Path:
     workspace = DEFAULT_WORKSPACE
+    ready, message = storage_readiness()
+    if not ready:
+        st.error("Tag Studio storage is not ready.")
+        st.write(message)
+        st.info("Ask a Shakudo administrator to check the storage environment settings, then restart Tag Studio.")
+        st.stop()
     ensure_workspace(workspace)
     return workspace
 
@@ -246,6 +255,7 @@ def choose_memo(workspace: Path) -> str | None:
         format_func=lambda memo_id: memo_display_name(workspace, memo_id),
     )
     st.session_state["active_memo_id"] = selected
+    hydrate_memo_from_remote(workspace, selected)
     return selected
 
 
@@ -1255,6 +1265,7 @@ def diagnostics_page(workspace: Path) -> None:
     st.subheader("Technical Diagnostics")
     st.write(
         {
+            "storage": storage_status(workspace),
             "workspace": str(workspace.resolve()),
             "schema_version": SCHEMA_VERSION,
             "tesseract_available": tesseract_available(),

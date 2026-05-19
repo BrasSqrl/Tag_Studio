@@ -28,5 +28,6 @@ The first launch may take a few minutes while Tag Studio sets itself up. After t
 - Messy pages are flagged for human review before section tagging starts.
 - Downloads are generated as a Review Workbook, Training File, and Audit Package.
 - Local work is stored in `tag_studio_workspace/`, which is ignored by Git.
+- Hosted Shakudo deployments can use S3-backed shared storage; see `README_SHAKUDO.md`.
 
 See `README_TAG_STUDIO.md` for more detail.
