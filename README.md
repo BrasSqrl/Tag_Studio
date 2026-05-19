@@ -17,16 +17,6 @@ Then open the local Streamlit URL shown in the terminal, usually:
 http://localhost:8501
 ```
 
-## Test PDF
-
-A fully synthetic test memo is included here:
-
-```text
-test_fixtures/synthetic_middle_market_credit_memo.pdf
-```
-
-It contains no real borrower, customer, or bank data.
-
 ## Notes
 
 - Digital PDFs are extracted locally with PyMuPDF.
