@@ -4,11 +4,13 @@ Tag Studio is a local-first Streamlit application for creating golden-copy taggi
 
 ## Run
 
+For normal users, double-click:
+
 ```powershell
-.\run_tag_studio.bat
+.\Start Tag Studio.bat
 ```
 
-Or:
+For admin/debug use, run Streamlit directly:
 
 ```powershell
 python -m streamlit run tag_studio\app.py

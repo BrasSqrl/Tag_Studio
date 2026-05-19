@@ -1,27 +1,30 @@
 # Tag Studio
 
-Tag Studio is a local-first Python/Streamlit application for creating golden-copy tagging data from credit memo PDFs.
+Tag Studio is a local-first credit memo tagging app.
 
-It is designed for the CRAIG workflow: upload a credit memo, extract text locally, map memo headings to canonical credit-review sections, tag the memo with evidence, approve the result as gold data, and export Excel plus JSONL files for model tuning.
+It helps credit professionals upload a memo, confirm the memo sections, tag the credit review with evidence, approve the result, and download the files needed for review and model tuning.
 
 ## Quick Start
 
+Double-click:
+
 ```bat
-setup_tag_studio.bat
-run_tag_studio.bat
+Start Tag Studio.bat
 ```
 
-Then open the local Streamlit URL shown in the terminal, usually:
+The first launch may take a few minutes while Tag Studio sets itself up. After that, follow the five steps shown in the app:
 
-```text
-http://localhost:8501
-```
+1. Add Memo
+2. Confirm Sections
+3. Tag Credit Review
+4. Quality Check
+5. Download Results
 
 ## Notes
 
 - Digital PDFs are extracted locally with PyMuPDF.
-- Scanned PDFs require the Tesseract OCR engine to be installed and available on `PATH`.
-- Exports are generated as Excel and JSONL files.
-- Local workspace data is stored in `tag_studio_workspace/`, which is ignored by Git.
+- Scanned PDFs need OCR support installed on the computer.
+- Downloads are generated as a Review Workbook, Training File, and Audit Package.
+- Local work is stored in `tag_studio_workspace/`, which is ignored by Git.
 
 See `README_TAG_STUDIO.md` for more detail.
