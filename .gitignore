@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.streamlit/
+tag_studio_workspace/
+tag_studio_test_workspace/
