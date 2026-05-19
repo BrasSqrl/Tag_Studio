@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tag Studio User Guide</title>
+  <style>
+    :root {
+      --navy: #102033;
+      --navy-2: #17324d;
+      --teal: #2f6975;
+      --green: #2f855a;
+      --amber: #b7791f;
+      --red: #c53030;
+      --blue: #2b6cb0;
+      --ink: #172333;
+      --muted: #5f6f83;
+      --line: #d9e3ec;
+      --paper: #ffffff;
+      --wash: #f5f8fb;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--wash);
+      font-family: Inter, Segoe UI, Roboto, Arial, sans-serif;
+      line-height: 1.55;
+    }
+    header {
+      color: white;
+      background: linear-gradient(135deg, var(--navy), var(--teal));
+      padding: 42px 48px;
+    }
+    header h1 { margin: 0 0 8px; font-size: 34px; letter-spacing: 0; }
+    header p { margin: 0; max-width: 900px; color: #dbeaf3; font-size: 17px; }
+    nav {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 12px 48px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255,255,255,.96);
+    }
+    nav a {
+      color: var(--navy-2);
+      text-decoration: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 11px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+    main { max-width: 1120px; margin: 0 auto; padding: 28px 24px 56px; }
+    section {
+      margin: 20px 0;
+      padding: 26px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--paper);
+      box-shadow: 0 10px 24px rgba(16, 32, 51, .05);
+    }
+    h2 { margin: 0 0 12px; font-size: 25px; }
+    h3 { margin: 22px 0 8px; font-size: 18px; }
+    p { margin: 8px 0 12px; }
+    ul, ol { padding-left: 24px; }
+    li { margin: 7px 0; }
+    code {
+      color: var(--navy-2);
+      background: #eef5f8;
+      border: 1px solid #d8e7ed;
+      border-radius: 5px;
+      padding: 1px 5px;
+      font-family: Consolas, Monaco, monospace;
+      font-size: 90%;
+    }
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .tile {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 14px;
+      background: #fbfdff;
+    }
+    .tile strong { display: block; margin-bottom: 5px; color: var(--navy-2); }
+    .callout {
+      margin: 14px 0;
+      border-radius: 10px;
+      padding: 13px 15px;
+      border-left: 5px solid var(--blue);
+      background: #f4f8ff;
+    }
+    .callout.judgment { border-left-color: var(--teal); background: #f2faf9; }
+    .callout.stop { border-left-color: var(--red); background: #fff5f5; }
+    .callout.mistake { border-left-color: var(--amber); background: #fffaf0; }
+    .callout strong { color: var(--navy-2); }
+    figure {
+      margin: 18px 0;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      overflow: hidden;
+      background: white;
+    }
+    figure img { display: block; width: 100%; height: auto; }
+    figcaption {
+      padding: 10px 14px;
+      color: var(--muted);
+      border-top: 1px solid var(--line);
+      font-size: 13px;
+    }
+    .hint {
+      position: relative;
+      display: inline-block;
+      color: var(--blue);
+      border-bottom: 1px dotted var(--blue);
+      cursor: help;
+      font-weight: 700;
+    }
+    .hint:hover::after,
+    .hint:focus::after {
+      content: attr(data-tip);
+      position: absolute;
+      left: 0;
+      bottom: 135%;
+      z-index: 20;
+      width: 280px;
+      color: white;
+      background: var(--navy);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font-weight: 500;
+      box-shadow: 0 12px 24px rgba(0,0,0,.2);
+    }
+    .badge {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 3px 9px;
+      color: white;
+      background: var(--teal);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+    .source-list li { margin-bottom: 9px; }
+    @media (max-width: 800px) {
+      header, nav { padding-left: 22px; padding-right: 22px; }
+      .grid { grid-template-columns: 1fr; }
+      section { padding: 18px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="badge">Credit reviewer guide</span>
+    <h1>Tag Studio User Guide</h1>
+    <p>Use this guide when reviewing credit memo PDFs, confirming extracted text, mapping memo sections, saving evidence-backed tags, and approving records for the training dataset.</p>
+  </header>
+
+  <nav aria-label="Guide sections">
+    <a href="#purpose">Purpose</a>
+    <a href="#workflow">Workflow</a>
+    <a href="#add-memo">Add Memo</a>
+    <a href="#text-quality">Text Quality</a>
+    <a href="#sections">Sections</a>
+    <a href="#tagging">Tags & Evidence</a>
+    <a href="#quality">Quality Check</a>
+    <a href="#downloads">Downloads</a>
+    <a href="#mistakes">Mistakes</a>
+  </nav>
+
+  <main>
+    <section id="purpose">
+      <h2>What Tag Studio Is For</h2>
+      <p>Tag Studio helps credit reviewers turn credit memo content into clean, evidence-backed training records. The goal is not to make a credit decision inside this tool. The goal is to create reliable examples of what a strong credit review should notice, cite, and preserve.</p>
+      <div class="callout judgment">
+        <strong>Credit reviewer judgment:</strong> Treat every saved tag as something another reviewer could defend from the memo text. If the memo is unclear, mark that uncertainty instead of guessing.
+      </div>
+      <p><span class="hint" data-tip="A record is ready only after required sections, required tags, and evidence have been checked.">Approved for Training Dataset</span> means the memo record is clean enough to be exported for model-training workflows. It does not mean the credit is approved.</p>
+    </section>
+
+    <section id="workflow">
+      <h2>The Six-Step Workflow</h2>
+      <div class="grid">
+        <div class="tile"><strong>1. Add Memo</strong> Upload the PDF and identify the memo type, facility type, and reviewer.</div>
+        <div class="tile"><strong>2. Review Text Quality</strong> Compare page images with extracted text before section mapping.</div>
+        <div class="tile"><strong>3. Confirm Sections</strong> Match memo headings to standard memo sections.</div>
+        <div class="tile"><strong>4. Tag Credit Review</strong> Save the credit facts, risks, mitigants, and evidence.</div>
+        <div class="tile"><strong>5. Quality Check</strong> Resolve missing sections, missing tags, and missing evidence.</div>
+        <div class="tile"><strong>6. Download Results</strong> Create review, training, and audit files.</div>
+      </div>
+      <figure>
+        <img src="assets/figure-07-admin-tools-collapsed.png" alt="Tag Studio sidebar with Admin Tools collapsed and User Guide visible">
+        <figcaption>Figure 1. Normal reviewer navigation with <code>Admin Tools</code> collapsed and <code>User Guide</code> available in the sidebar.</figcaption>
+      </figure>
+    </section>
+
+    <section id="add-memo">
+      <h2>Add Memo</h2>
+      <p>Start at <code>Add Memo</code>. Select the credit memo PDF, enter the borrower name or internal borrower ID, choose the memo type and facility type, then select <code>Read Memo</code>. See Figure 2, <code>Add Memo > Read Memo</code>.</p>
+      <div class="callout mistake">
+        <strong>Common mistake:</strong> Do not leave memo type or facility type on a convenient default if it does not match the memo. Those choices affect what sections the app expects later.
+      </div>
+      <figure>
+        <img src="assets/figure-01-add-memo.png" alt="Add Memo screen in Tag Studio">
+        <figcaption>Figure 2. <code>Add Memo</code> screen captured from Tag Studio using synthetic TEST_BORROWER data.</figcaption>
+      </figure>
+    </section>
+
+    <section id="text-quality">
+      <h2>Review Text Quality</h2>
+      <p>Use <code>Review Text Quality</code> to confirm the extracted text is good enough for tagging. Open any page marked <code>Needs Review</code>, compare the page image to the extracted text, correct obvious OCR problems, and select <code>Save Page Review</code>. See Figure 3, <code>Review Text Quality > Save Page Review</code>.</p>
+      <div class="callout stop">
+        <strong>When to stop:</strong> If a page image contains unreadable text, handwriting, or important tables that did not extract correctly, record that issue in reviewer notes before moving on.
+      </div>
+      <p>Use <span class="hint" data-tip="This confirms the page can support reliable section mapping and tagging.">Save Page Review</span> when you changed text or added notes. Use <span class="hint" data-tip="Use this only if the page image and extracted text already match closely enough.">Mark Page Reviewed</span> when no correction is needed.</p>
+      <figure>
+        <img src="assets/figure-02-review-text-quality.png" alt="Review Text Quality screen with page metrics and page review area">
+        <figcaption>Figure 3. <code>Review Text Quality</code> screen showing page-level quality metrics and review actions.</figcaption>
+      </figure>
+    </section>
+
+    <section id="sections">
+      <h2>Confirm Sections</h2>
+      <p>Use <code>Confirm Sections</code> to map the memo's original headings to Tag Studio's standard memo sections. The original heading can vary across banks or memo templates; the standard section should be consistent. See Figure 4, <code>Confirm Sections > Standard Memo Section</code>.</p>
+      <div class="callout judgment">
+        <strong>Credit reviewer judgment:</strong> Pick the standard section that reflects the purpose of the text, not just the exact words in the heading.
+      </div>
+      <p>Use <span class="hint" data-tip="This helps future memos with similar heading language map correctly.">Remember this heading next time</span> only when you are confident the memo heading is a good alias for the selected standard section.</p>
+      <figure>
+        <img src="assets/figure-03-confirm-sections.png" alt="Confirm Sections screen with section mapping cards">
+        <figcaption>Figure 4. <code>Confirm Sections</code> screen showing detected memo headings, section status, and standard section mapping.</figcaption>
+      </figure>
+    </section>
+
+    <section id="tagging">
+      <h2>Tag Credit Review and Attach Evidence</h2>
+      <p>Use <code>Tag Credit Review</code> one section at a time. The left side shows the memo page, the middle shows section text, and the right side captures evidence. Select the lines that support the tag values, choose the evidence type, then select <code>Add Evidence</code>. See Figure 5, <code>Tag Credit Review > Select evidence lines</code>.</p>
+      <div class="callout judgment">
+        <strong>Credit reviewer judgment:</strong> Evidence should answer, "Where did this tag come from?" If the tag describes a repayment source, weakness, covenant, exception, or structure recommendation, cite the memo text that supports it.
+      </div>
+      <p>Use <span class="hint" data-tip="High confidence means the memo text directly supports the tag. Medium means support is reasonable but not perfect. Low means a reviewer should be cautious.">Citation confidence</span> to signal whether the selected text directly supports the point. After evidence is attached, complete the tag panels and select <code>Save This Section</code>.</p>
+      <figure>
+        <img src="assets/figure-04-tag-credit-review.png" alt="Tag Credit Review screen with memo page, section text, evidence, and tag panels">
+        <figcaption>Figure 5. <code>Tag Credit Review</code> screen showing the page preview, section text, evidence panel, and credit tags.</figcaption>
+      </figure>
+    </section>
+
+    <section id="quality">
+      <h2>Quality Check</h2>
+      <p>Use <code>Quality Check</code> before approving a memo record. The screen summarizes whether pages were checked, sections were confirmed, tags were saved, and evidence was attached. See Figure 6, <code>Quality Check > Approve for Training Dataset</code>.</p>
+      <div class="callout stop">
+        <strong>When to stop:</strong> If the quality check lists missing sections, missing tags, or missing evidence, return to the listed step and fix the item before approval.
+      </div>
+      <figure>
+        <img src="assets/figure-05-quality-check.png" alt="Quality Check screen with readiness metrics and approval action">
+        <figcaption>Figure 6. <code>Quality Check</code> screen showing readiness metrics and the approval action.</figcaption>
+      </figure>
+    </section>
+
+    <section id="downloads">
+      <h2>Download Results</h2>
+      <p>Use <code>Download Results</code> after the memo is approved for the training dataset. Create only the files you need. See Figure 7, <code>Download Results > Available Downloads</code>.</p>
+      <ul>
+        <li><strong>Review Workbook:</strong> Excel file for human review and QA.</li>
+        <li><strong>Training File:</strong> Structured model-training file prepared from approved records.</li>
+        <li><strong>Audit Package:</strong> Traceability file for review history and QA support.</li>
+      </ul>
+      <figure>
+        <img src="assets/figure-06-download-results.png" alt="Download Results screen with review workbook, training file, and audit package actions">
+        <figcaption>Figure 7. <code>Download Results</code> screen showing the three reviewer-facing download packages.</figcaption>
+      </figure>
+    </section>
+
+    <section id="mistakes">
+      <h2>Common Reviewer Mistakes</h2>
+      <ul>
+        <li><strong>Skipping text review:</strong> OCR errors can create bad tags. Check pages marked for review before confirming sections.</li>
+        <li><strong>Mapping by wording only:</strong> A heading called "Cash Flow" may belong to <code>Repayment Analysis</code> depending on the content.</li>
+        <li><strong>Saving tags without evidence:</strong> Important credit facts should be tied to memo text whenever possible.</li>
+        <li><strong>Using "Not addressed" too quickly:</strong> First check whether the memo discusses the topic under a different heading.</li>
+        <li><strong>Approving incomplete records:</strong> Use <code>Quality Check</code> as the final gate before any training export.</li>
+      </ul>
+    </section>
+
+    <section id="sources">
+      <h2>Guide Sources</h2>
+      <p>This guide cites captured Tag Studio app screens from a synthetic TEST_BORROWER memo. No real borrower or customer data is used.</p>
+      <ol class="source-list">
+        <li>Figure 1: Tag Studio sidebar, <code>Admin Tools</code> collapsed and <code>User Guide</code> visible.</li>
+        <li>Figure 2: Tag Studio <code>Add Memo</code> screen.</li>
+        <li>Figure 3: Tag Studio <code>Review Text Quality</code> screen.</li>
+        <li>Figure 4: Tag Studio <code>Confirm Sections</code> screen.</li>
+        <li>Figure 5: Tag Studio <code>Tag Credit Review</code> screen.</li>
+        <li>Figure 6: Tag Studio <code>Quality Check</code> screen.</li>
+        <li>Figure 7: Tag Studio <code>Download Results</code> screen.</li>
+      </ol>
+    </section>
+  </main>
+</body>
+</html>

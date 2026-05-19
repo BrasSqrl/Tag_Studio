@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import re
 import sys
 from html import escape
 from pathlib import Path
@@ -56,6 +58,9 @@ from tag_studio.storage import (
 
 st.set_page_config(page_title="Tag Studio", page_icon="TS", layout="wide")
 
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+USER_GUIDE_PATH = PROJECT_ROOT / "docs" / "user_guide" / "tag_studio_user_guide.html"
 
 WIZARD_STEPS = [
     "Add Memo",
@@ -202,6 +207,44 @@ def show_header() -> None:
         """,
         unsafe_allow_html=True,
     )
+
+
+def _inline_user_guide_assets(html: str) -> str:
+    assets_dir = USER_GUIDE_PATH.parent
+
+    def replace_src(match: re.Match[str]) -> str:
+        quote = match.group(1)
+        src = match.group(2)
+        asset_path = (assets_dir / src).resolve()
+        try:
+            asset_path.relative_to(assets_dir.resolve())
+        except ValueError:
+            return match.group(0)
+        if not asset_path.exists():
+            return match.group(0)
+        mime = "image/png" if asset_path.suffix.lower() == ".png" else "image/jpeg"
+        encoded = base64.b64encode(asset_path.read_bytes()).decode("ascii")
+        return f'src={quote}data:{mime};base64,{encoded}{quote}'
+
+    return re.sub(r'src=(["\'])(assets/[^"\']+)\1', replace_src, html)
+
+
+def user_guide_page() -> None:
+    st.subheader("User Guide")
+    st.caption("Step-by-step guidance for credit reviewers using Tag Studio.")
+    if not USER_GUIDE_PATH.exists():
+        st.warning("The user guide has not been created yet.")
+        return
+    html = USER_GUIDE_PATH.read_text(encoding="utf-8")
+    download_html = _inline_user_guide_assets(html)
+    st.download_button(
+        "Download User Guide",
+        data=download_html.encode("utf-8"),
+        file_name=USER_GUIDE_PATH.name,
+        mime="text/html",
+        help="Download the standalone guide so it can be opened outside Tag Studio.",
+    )
+    st.iframe(USER_GUIDE_PATH, height=920)
 
 
 def load_section_defs(workspace: Path) -> list[SectionDefinition]:
@@ -414,13 +457,27 @@ def add_memo_page(workspace: Path) -> None:
             "before Tag Studio can reliably read page images."
         )
     with st.form("add_memo_form"):
-        uploaded = st.file_uploader("Credit memo PDF", type=["pdf"])
+        uploaded = st.file_uploader(
+            "Credit memo PDF",
+            type=["pdf"],
+            help="Choose the memo you want reviewed and tagged. Use a PDF that contains no information outside the review packet.",
+        )
         borrower = st.text_input("Borrower name or internal borrower ID")
         col1, col2 = st.columns(2)
         with col1:
-            memo_type = st.selectbox("Memo type", DEFAULT_MEMO_TYPES, index=1)
+            memo_type = st.selectbox(
+                "Memo type",
+                DEFAULT_MEMO_TYPES,
+                index=1,
+                help="Pick the closest credit action so required sections and review expectations match the memo.",
+            )
         with col2:
-            facility_type = st.selectbox("Facility type", DEFAULT_FACILITY_TYPES, index=7)
+            facility_type = st.selectbox(
+                "Facility type",
+                DEFAULT_FACILITY_TYPES,
+                index=7,
+                help="Pick the main facility type so Tag Studio can apply the right section and tagging expectations.",
+            )
         reviewer = st.text_input("Reviewer name")
         submitted = st.form_submit_button("Read Memo", type="primary")
 
@@ -589,7 +646,11 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
         )
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Save Page Review", type="primary"):
+            if st.button(
+                "Save Page Review",
+                type="primary",
+                help="Save corrected page text and mark this page as reviewed for section mapping.",
+            ):
                 for record in page_text:
                     if int(record["page_number"]) == selected_page_number:
                         record["text"] = corrected_text
@@ -606,7 +667,10 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
                 st.success("Page review saved.")
                 st.rerun()
         with col2:
-            if st.button("Mark Page Reviewed"):
+            if st.button(
+                "Mark Page Reviewed",
+                help="Use this only when the extracted text already matches the page image closely enough for tagging.",
+            ):
                 for record in page_quality:
                     if int(record["page_number"]) == selected_page_number:
                         record["reviewer_confirmed"] = True
@@ -721,6 +785,7 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
                     index=section_options.index(current_id),
                     format_func=lambda value: definitions[value].display_name,
                     key=f"confirm_standard_{memo_id}_{section.get('section_id')}_{idx}",
+                    help="Choose the standard section name that best matches the memo heading, even if the memo uses different wording.",
                 )
             with col2:
                 status = st.radio(
@@ -729,11 +794,13 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
                     index=2 if section.get("missing_required") else (0 if section.get("reviewer_confirmed") else 1),
                     horizontal=True,
                     key=f"confirm_status_{memo_id}_{section.get('section_id')}_{idx}",
+                    help="Confirm the section when the text and standard section are correct. Use missing only when the memo does not address a required topic.",
                 )
             remember = st.checkbox(
                 "Remember this heading next time",
                 value=False,
                 key=f"remember_alias_{memo_id}_{section.get('section_id')}_{idx}",
+                help="Save this memo's heading as an accepted name for the selected standard section in future memos.",
             )
             text = st.text_area(
                 "Section text",
@@ -862,6 +929,7 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
             list(range(len(raw_lines))),
             format_func=lambda idx: f"Line {idx + 1}: {raw_lines[idx][:100]}",
             key=f"evidence_lines_{memo_id}_{section_id}",
+            help="Select the exact lines that support the tag values you plan to save.",
         )
         selected_line_text = "\n".join(raw_lines[idx] for idx in selected_line_indices)
         if selected_line_text:
@@ -876,8 +944,15 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
             "Evidence type",
             ["Supporting fact", "Missing information", "Contradiction", "Score support", "Policy exception", "Outcome support"],
             key=f"evidence_role_{memo_id}_{section_id}",
+            help="Classify why this evidence matters for the credit review.",
         )
-        citation_confidence = st.selectbox("Citation confidence", ["High", "Medium", "Low"], index=1, key=f"citation_confidence_{memo_id}_{section_id}")
+        citation_confidence = st.selectbox(
+            "Citation confidence",
+            ["High", "Medium", "Low"],
+            index=1,
+            key=f"citation_confidence_{memo_id}_{section_id}",
+            help="Use High when the selected text directly supports the point. Use Low when it needs reviewer caution.",
+        )
         if st.button("Add Evidence", key=f"add_evidence_{memo_id}_{section_id}"):
             evidence_text = manual_evidence_text.strip() or selected_line_text.strip()
             if not evidence_text:
@@ -921,7 +996,12 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
                     with cols[idx % 2]:
                         values[definition.tag_id] = _render_tag_input(definition, key=f"input_{memo_id}_{section_id}_{definition.tag_id}")
 
-        confidence = st.selectbox("Overall confidence for this section", ["High", "Medium", "Low"], index=1)
+        confidence = st.selectbox(
+            "Overall confidence for this section",
+            ["High", "Medium", "Low"],
+            index=1,
+            help="Rate how confident you are that the saved tags accurately reflect this section.",
+        )
         tagger = st.text_input("Reviewer", value=memo.get("reviewer", ""))
         save_batch = st.form_submit_button("Save This Section", type="primary")
 
@@ -1113,7 +1193,11 @@ def quality_check_page(workspace: Path, memo_id: str | None) -> None:
         reviewer = st.text_input("Reviewer", value=review.get("reviewer", load_memo_record(workspace, memo_id).get("reviewer", "")))
         adjudicator = st.text_input("Approver", value=review.get("adjudicator", ""))
         notes = st.text_area("Approval notes", value=review.get("adjudication_notes", ""), height=110)
-        approved = st.form_submit_button("Approve for Training Dataset", type="primary")
+        approved = st.form_submit_button(
+            "Approve for Training Dataset",
+            type="primary",
+            help="Approve only when required sections, tags, and evidence are complete enough to be used as training data.",
+        )
     if approved:
         review.update(
             {
@@ -1150,14 +1234,22 @@ def download_results_page(workspace: Path, memo_id: str | None) -> None:
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown('<div class="soft-panel"><b>Review Workbook</b><br><span class="small-muted">Excel workbook for human review.</span></div>', unsafe_allow_html=True)
-        if st.button("Prepare Review Workbook", type="primary"):
+        if st.button(
+            "Prepare Review Workbook",
+            type="primary",
+            help="Create an Excel workbook for human QA and review.",
+        ):
             prepared["review_workbook"] = str(export_excel(workspace, include_only_approved=True))
         review_path = Path(prepared["review_workbook"]) if prepared.get("review_workbook") else None
         if review_path and review_path.exists():
             st.download_button("Download Review Workbook", data=review_path.read_bytes(), file_name=review_path.name)
     with col2:
         st.markdown('<div class="soft-panel"><b>Training File</b><br><span class="small-muted">Structured file for the model tuning pipeline.</span></div>', unsafe_allow_html=True)
-        if st.button("Prepare Training File", type="primary"):
+        if st.button(
+            "Prepare Training File",
+            type="primary",
+            help="Create the structured training files from approved memo records.",
+        ):
             paths = export_jsonl(workspace, include_only_approved=True)
             prepared["section_training"] = str(paths["sections"])
             prepared["memo_training"] = str(paths["memos"])
@@ -1169,7 +1261,10 @@ def download_results_page(workspace: Path, memo_id: str | None) -> None:
             st.download_button("Download Memo Training File", data=memo_training_path.read_bytes(), file_name=memo_training_path.name)
     with col3:
         st.markdown('<div class="soft-panel"><b>Audit Package</b><br><span class="small-muted">Traceability package for QA.</span></div>', unsafe_allow_html=True)
-        if st.button("Prepare Audit Package"):
+        if st.button(
+            "Prepare Audit Package",
+            help="Create a traceability package showing what was reviewed, tagged, and approved.",
+        ):
             prepared["audit_package"] = str(export_memo_bundle(workspace, memo_id))
         audit_path = Path(prepared["audit_package"]) if prepared.get("audit_package") else None
         if audit_path and audit_path.exists():
@@ -1317,6 +1412,11 @@ def main() -> None:
         default_step = "Add Memo"
 
     admin_mode = st.sidebar.checkbox("Admin Tools", value=False)
+    guide_mode = st.sidebar.checkbox("User Guide", value=False, help="Open the credit reviewer guide for this app.")
+    if guide_mode:
+        user_guide_page()
+        return
+
     if admin_mode:
         admin_tools_page(workspace, active_memo_id)
         return
