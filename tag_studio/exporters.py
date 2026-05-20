@@ -9,11 +9,16 @@ import pandas as pd
 
 from .defaults import SCHEMA_VERSION
 from .storage import (
+    active_schema_hash,
     list_memo_ids,
+    load_audit_events,
     load_evidence,
+    load_facilities,
     load_memo_record,
+    load_outcomes,
     load_review,
     load_sections,
+    load_table_metrics,
     load_tags,
     memo_dir,
     read_json,
@@ -25,28 +30,48 @@ def _now_stamp() -> str:
     return datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
 
-def _approved_memo_ids(workspace: Path, include_only_approved: bool) -> list[str]:
+def _approved_memo_ids(workspace: Path, include_only_approved: bool, include_legacy_approved: bool = False) -> list[str]:
     memo_ids = list_memo_ids(workspace)
     if not include_only_approved:
         return memo_ids
-    return [memo_id for memo_id in memo_ids if load_review(workspace, memo_id).get("status") == "Approved Gold"]
+    current_hash = active_schema_hash(workspace)
+    approved = []
+    for memo_id in memo_ids:
+        memo = load_memo_record(workspace, memo_id)
+        review = load_review(workspace, memo_id)
+        if review.get("status") != "Approved Gold":
+            continue
+        if not include_legacy_approved and memo.get("schema_hash") and memo.get("schema_hash") != current_hash:
+            continue
+        approved.append(memo_id)
+    return approved
 
 
-def build_export_tables(workspace: Path, include_only_approved: bool = True) -> dict[str, list[dict[str, Any]]]:
-    memo_ids = _approved_memo_ids(workspace, include_only_approved)
+def build_export_tables(
+    workspace: Path,
+    include_only_approved: bool = True,
+    include_legacy_approved: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
+    memo_ids = _approved_memo_ids(workspace, include_only_approved, include_legacy_approved)
     tables = {
         "Memos": [],
         "Sections": [],
         "Section Mapping": [],
+        "Facilities": [],
         "Tags": [],
         "Evidence": [],
+        "Table Metrics": [],
         "Scores": [],
         "Outcomes": [],
         "Page Quality": [],
         "Extraction Warnings": [],
+        "Schema Snapshot": [],
+        "Audit Events": [],
         "Review Status": [],
         "Export Manifest": [],
     }
+    scoring_rubric = read_json(workspace / "config" / "scoring_rubric.json", [])
+    scoring_tag_ids = {str(record.get("component_tag_id")) for record in scoring_rubric}
 
     for memo_id in memo_ids:
         memo = load_memo_record(workspace, memo_id)
@@ -54,8 +79,12 @@ def build_export_tables(workspace: Path, include_only_approved: bool = True) -> 
         sections = load_sections(workspace, memo_id)
         tags = load_tags(workspace, memo_id)
         evidence = load_evidence(workspace, memo_id)
+        facilities = load_facilities(workspace, memo_id)
+        outcomes = load_outcomes(workspace, memo_id)
+        table_metrics = load_table_metrics(workspace, memo_id)
         page_quality = read_json(memo_dir(workspace, memo_id) / "extraction" / "page_quality.json", [])
         extraction_warnings = read_json(memo_dir(workspace, memo_id) / "extraction" / "ocr_warnings.json", [])
+        schema_snapshot = read_json(memo_dir(workspace, memo_id) / "schema" / "schema_snapshot.json", {})
 
         tables["Memos"].append(memo)
         tables["Review Status"].append(review)
@@ -73,18 +102,36 @@ def build_export_tables(workspace: Path, include_only_approved: bool = True) -> 
             }
             for section in sections
         )
+        tables["Facilities"].extend(facilities)
         tables["Tags"].extend(tags)
         tables["Evidence"].extend(evidence)
-        tables["Scores"].extend(tag for tag in tags if "score" in str(tag.get("tag_id", "")))
-        tables["Outcomes"].extend(tag for tag in tags if str(tag.get("tag_id", "")).startswith("outcome"))
+        tables["Table Metrics"].extend(table_metrics)
+        tables["Scores"].extend(tag for tag in tags if tag.get("tag_id") in scoring_tag_ids or "score" in str(tag.get("tag_id", "")))
+        tables["Outcomes"].extend(outcomes)
         tables["Page Quality"].extend(page_quality)
         tables["Extraction Warnings"].extend(extraction_warnings)
+        if schema_snapshot:
+            tables["Schema Snapshot"].append(
+                {
+                    "memo_id": memo_id,
+                    "schema_version": schema_snapshot.get("schema_version"),
+                    "schema_hash": schema_snapshot.get("schema_hash"),
+                    "created_at": schema_snapshot.get("created_at"),
+                    "section_count": len(schema_snapshot.get("sections", [])),
+                    "tag_count": len(schema_snapshot.get("tags", [])),
+                    "outcome_label_count": len(schema_snapshot.get("outcome_taxonomy", [])),
+                    "scoring_rule_count": len(schema_snapshot.get("scoring_rubric", [])),
+                }
+            )
+        tables["Audit Events"].extend(load_audit_events(workspace, memo_id))
 
     tables["Export Manifest"].append(
         {
             "schema_version": SCHEMA_VERSION,
+            "schema_hash": active_schema_hash(workspace),
             "created_at": datetime.now(UTC).isoformat(),
             "include_only_approved": include_only_approved,
+            "include_legacy_approved": include_legacy_approved,
             "memo_count": len(memo_ids),
             "memo_ids": ", ".join(memo_ids),
         }
@@ -92,11 +139,15 @@ def build_export_tables(workspace: Path, include_only_approved: bool = True) -> 
     return tables
 
 
-def export_excel(workspace: Path, include_only_approved: bool = True) -> Path:
+def export_excel(workspace: Path, include_only_approved: bool = True, include_legacy_approved: bool = False) -> Path:
     export_dir = workspace / "exports"
     export_dir.mkdir(parents=True, exist_ok=True)
     path = export_dir / f"tag_studio_export_{_now_stamp()}.xlsx"
-    tables = build_export_tables(workspace, include_only_approved=include_only_approved)
+    tables = build_export_tables(
+        workspace,
+        include_only_approved=include_only_approved,
+        include_legacy_approved=include_legacy_approved,
+    )
 
     with pd.ExcelWriter(path, engine="openpyxl") as writer:
         for sheet_name, rows in tables.items():
@@ -134,30 +185,80 @@ def _evidence_by_id(evidence: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
     return {item.get("evidence_id"): item for item in evidence}
 
 
+def _tags_for_evidence(tags: list[dict[str, Any]], evidence_id: str) -> list[dict[str, Any]]:
+    return [tag for tag in tags if evidence_id in tag.get("evidence_ids", [])]
+
+
 def _json_dumps(data: Any) -> str:
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
-def export_jsonl(workspace: Path, include_only_approved: bool = True) -> dict[str, Path]:
+def export_jsonl(workspace: Path, include_only_approved: bool = True, include_legacy_approved: bool = False) -> dict[str, Path]:
     export_dir = workspace / "exports"
     export_dir.mkdir(parents=True, exist_ok=True)
     stamp = _now_stamp()
+    span_path = export_dir / f"training_spans_{stamp}.jsonl"
     section_path = export_dir / f"training_sections_{stamp}.jsonl"
     memo_path = export_dir / f"training_memos_{stamp}.jsonl"
     audit_path = export_dir / f"audit_records_{stamp}.jsonl"
 
-    memo_ids = _approved_memo_ids(workspace, include_only_approved)
-    with section_path.open("w", encoding="utf-8") as section_file, memo_path.open("w", encoding="utf-8") as memo_file, audit_path.open("w", encoding="utf-8") as audit_file:
+    memo_ids = _approved_memo_ids(workspace, include_only_approved, include_legacy_approved)
+    with (
+        span_path.open("w", encoding="utf-8") as span_file,
+        section_path.open("w", encoding="utf-8") as section_file,
+        memo_path.open("w", encoding="utf-8") as memo_file,
+        audit_path.open("w", encoding="utf-8") as audit_file,
+    ):
         for memo_id in memo_ids:
             memo = load_memo_record(workspace, memo_id)
             review = load_review(workspace, memo_id)
             sections = load_sections(workspace, memo_id)
             tags = load_tags(workspace, memo_id)
             evidence = load_evidence(workspace, memo_id)
+            facilities = load_facilities(workspace, memo_id)
+            outcomes = load_outcomes(workspace, memo_id)
+            table_metrics = load_table_metrics(workspace, memo_id)
             page_quality = read_json(memo_dir(workspace, memo_id) / "extraction" / "page_quality.json", [])
             extraction_warnings = read_json(memo_dir(workspace, memo_id) / "extraction" / "ocr_warnings.json", [])
+            schema_snapshot = read_json(memo_dir(workspace, memo_id) / "schema" / "schema_snapshot.json", {})
             evidence_lookup = _evidence_by_id(evidence)
             quality_by_page = {int(item.get("page_number")): item for item in page_quality if item.get("page_number")}
+            facilities_by_id = {facility.get("facility_id"): facility for facility in facilities}
+
+            for evidence_record in evidence:
+                evidence_id = str(evidence_record.get("evidence_id", ""))
+                linked_tags = _tags_for_evidence(tags, evidence_id)
+                if not linked_tags:
+                    continue
+                section = next((item for item in sections if item.get("section_id") == evidence_record.get("section_id")), {})
+                response = {
+                    "schema_version": SCHEMA_VERSION,
+                    "schema_hash": memo.get("schema_hash", ""),
+                    "memo_id": memo_id,
+                    "evidence": evidence_record,
+                    "tags": linked_tags,
+                    "facilities": [
+                        facilities_by_id[facility_id]
+                        for facility_id in evidence_record.get("facility_ids", [])
+                        if facility_id in facilities_by_id
+                    ],
+                }
+                span_file.write(
+                    _json_dumps(
+                        {
+                            "instruction": "Map this cited credit memo evidence span to the reviewed underwriting tags it supports.",
+                            "context": (
+                                f"Memo ID: {memo_id}\n"
+                                f"Canonical section: {section.get('canonical_section_name', '')}\n"
+                                f"Original heading: {section.get('original_header', '')}\n"
+                                f"Source location: {evidence_record.get('source_location', '')}\n\n"
+                                f"Evidence text:\n{evidence_record.get('selected_text', '')}"
+                            ),
+                            "response": _json_dumps(response),
+                        }
+                    )
+                    + "\n"
+                )
 
             for section in sections:
                 section_tags = _tags_for_section(tags, section.get("section_id"))
@@ -169,6 +270,7 @@ def export_jsonl(workspace: Path, include_only_approved: bool = True) -> dict[st
                 }
                 response = {
                     "schema_version": SCHEMA_VERSION,
+                    "schema_hash": memo.get("schema_hash", ""),
                     "memo_id": memo_id,
                     "section_id": section.get("section_id"),
                     "canonical_section_id": section.get("canonical_section_id"),
@@ -184,6 +286,12 @@ def export_jsonl(workspace: Path, include_only_approved: bool = True) -> dict[st
                         ],
                     },
                     "tags": section_tags,
+                    "facilities": [
+                        facility
+                        for facility in facilities
+                        if facility.get("source_section_id") == section.get("section_id")
+                        or any(tag.get("facility_id") == facility.get("facility_id") for tag in section_tags)
+                    ],
                     "evidence": [evidence_lookup[evidence_id] for evidence_id in sorted(section_evidence_ids)],
                 }
                 quality_context = "; ".join(
@@ -218,6 +326,7 @@ def export_jsonl(workspace: Path, include_only_approved: bool = True) -> dict[st
             )
             memo_response = {
                 "schema_version": SCHEMA_VERSION,
+                "schema_hash": memo.get("schema_hash", ""),
                 "memo_id": memo_id,
                 "memo": memo,
                 "review": review,
@@ -230,11 +339,20 @@ def export_jsonl(workspace: Path, include_only_approved: bool = True) -> dict[st
                     }
                     for section in sections
                 ],
+                "facilities": facilities,
+                "outcomes": outcomes,
+                "table_metrics": table_metrics,
                 "tags": tags,
                 "evidence": evidence,
                 "extraction_quality": {
                     "page_quality": page_quality,
                     "warnings": extraction_warnings,
+                },
+                "schema_snapshot": {
+                    "schema_version": schema_snapshot.get("schema_version"),
+                    "schema_hash": schema_snapshot.get("schema_hash"),
+                    "section_count": len(schema_snapshot.get("sections", [])) if schema_snapshot else 0,
+                    "tag_count": len(schema_snapshot.get("tags", [])) if schema_snapshot else 0,
                 },
             }
             memo_file.write(
@@ -245,6 +363,8 @@ def export_jsonl(workspace: Path, include_only_approved: bool = True) -> dict[st
                             f"Memo ID: {memo_id}\n"
                             f"Memo type: {memo.get('memo_type', '')}\n"
                             f"Facility type: {memo.get('facility_type', '')}\n"
+                            f"Confirmed facilities: {len(facilities)}\n"
+                            f"Outcome records: {len(outcomes)}\n"
                             f"Text quality pages: {len(page_quality)}\n\n"
                             f"Memo text:\n{memo_text}"
                         ),
@@ -258,17 +378,19 @@ def export_jsonl(workspace: Path, include_only_approved: bool = True) -> dict[st
                     {
                         "memo_id": memo_id,
                         "schema_version": SCHEMA_VERSION,
+                        "schema_hash": memo.get("schema_hash", ""),
                         "source_hash": memo.get("source_hash", ""),
                         "review_status": review.get("status"),
+                        "include_legacy_approved": include_legacy_approved,
                         "exported_at": datetime.now(UTC).isoformat(),
                     }
                 )
                 + "\n"
             )
 
-    for path in [section_path, memo_path, audit_path]:
+    for path in [span_path, section_path, memo_path, audit_path]:
         sync_path_to_remote(workspace, path)
-    return {"sections": section_path, "memos": memo_path, "audit": audit_path}
+    return {"spans": span_path, "sections": section_path, "memos": memo_path, "audit": audit_path}
 
 
 def export_memo_bundle(workspace: Path, memo_id: str) -> Path:
@@ -279,12 +401,17 @@ def export_memo_bundle(workspace: Path, memo_id: str) -> Path:
         "memo": load_memo_record(workspace, memo_id),
         "review": load_review(workspace, memo_id),
         "sections": load_sections(workspace, memo_id),
+        "facilities": load_facilities(workspace, memo_id),
         "tags": load_tags(workspace, memo_id),
         "evidence": load_evidence(workspace, memo_id),
+        "outcomes": load_outcomes(workspace, memo_id),
+        "table_metrics": load_table_metrics(workspace, memo_id),
         "page_quality": read_json(memo_dir(workspace, memo_id) / "extraction" / "page_quality.json", []),
         "layout_blocks": read_json(memo_dir(workspace, memo_id) / "extraction" / "layout_blocks.json", []),
         "section_candidates": read_json(memo_dir(workspace, memo_id) / "sections" / "section_candidates.json", []),
         "extraction_warnings": read_json(memo_dir(workspace, memo_id) / "extraction" / "ocr_warnings.json", []),
+        "schema_snapshot": read_json(memo_dir(workspace, memo_id) / "schema" / "schema_snapshot.json", {}),
+        "audit_events": load_audit_events(workspace, memo_id),
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     sync_path_to_remote(workspace, path)

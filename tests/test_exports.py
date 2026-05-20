@@ -91,6 +91,7 @@ def test_jsonl_export_preserves_instruction_context_response_shape(tmp_path) -> 
 
     paths = export_jsonl(workspace, include_only_approved=True)
 
+    assert {"spans", "sections", "memos", "audit"} == set(paths)
     for path in paths.values():
         assert path.exists()
         for line in path.read_text(encoding="utf-8").splitlines():

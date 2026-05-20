@@ -13,6 +13,11 @@ from .models import SectionDefinition, TagDefinition
 
 SECTION_SHEET = "Standard Memo Sections"
 TAG_SHEET = "Credit Tags"
+FACILITY_TYPES_SHEET = "Facility Types"
+OUTCOME_SHEET = "Outcome Taxonomy"
+SCORING_SHEET = "Scoring Rubric"
+EVIDENCE_RULES_SHEET = "Evidence Rules"
+EXPORT_MAPPING_SHEET = "Export Mapping"
 INSTRUCTIONS_SHEET = "Instructions"
 ALLOWED_VALUES_SHEET = "Allowed Values"
 
@@ -37,19 +42,41 @@ TAG_COLUMNS = [
     "allowed_values",
     "required",
     "evidence_required",
+    "material",
+    "allowed_scopes",
+    "default_scope",
+    "facility_required",
     "scoring_use",
     "export_use",
     "help_text",
 ]
 
+OUTCOME_COLUMNS = ["label", "severity_rank"]
+SCORING_COLUMNS = [
+    "score_name",
+    "component_tag_id",
+    "weight",
+    "directionality",
+    "min_value",
+    "max_value",
+    "required_evidence",
+    "memo_types",
+    "facility_types",
+    "active",
+    "version",
+]
+
 DATA_TYPES = ["text", "long_text", "enum", "multi_select", "number", "boolean"]
 EXPORT_USES = ["section", "memo", "both", "none"]
+TAG_SCOPES = ["memo", "borrower", "facility", "section", "outcome"]
 
 
 @dataclass
 class TagSetupImportResult:
     sections: list[SectionDefinition] | None = None
     tags: list[TagDefinition] | None = None
+    outcomes: list[dict[str, Any]] | None = None
+    scoring: list[dict[str, Any]] | None = None
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -162,6 +189,7 @@ def _write_allowed_values(wb: Workbook) -> None:
         ["evidence_required", "TRUE; FALSE"],
         ["data_type", _join(DATA_TYPES)],
         ["export_use", _join(EXPORT_USES)],
+        ["tag_scope", _join(TAG_SCOPES)],
         ["memo_types", _join(DEFAULT_MEMO_TYPES)],
         ["facility_types", _join(DEFAULT_FACILITY_TYPES)],
     ]
@@ -172,7 +200,12 @@ def _write_allowed_values(wb: Workbook) -> None:
     ws.column_dimensions["B"].width = 95
 
 
-def create_tag_setup_workbook(sections: list[SectionDefinition], tags: list[TagDefinition]) -> bytes:
+def create_tag_setup_workbook(
+    sections: list[SectionDefinition],
+    tags: list[TagDefinition],
+    outcomes: list[dict[str, Any]] | None = None,
+    scoring: list[dict[str, Any]] | None = None,
+) -> bytes:
     wb = Workbook()
     _write_instructions(wb)
     _write_allowed_values(wb)
@@ -210,6 +243,10 @@ def create_tag_setup_workbook(sections: list[SectionDefinition], tags: list[TagD
                 _join(tag.allowed_values),
                 tag.required,
                 tag.evidence_required,
+                tag.material,
+                _join([str(scope) for scope in tag.allowed_scopes]),
+                tag.default_scope,
+                tag.facility_required,
                 tag.scoring_use,
                 tag.export_use,
                 tag.help_text,
@@ -219,7 +256,47 @@ def create_tag_setup_workbook(sections: list[SectionDefinition], tags: list[TagD
     _add_validation(tag_ws, "D2:D1000", DATA_TYPES)
     _add_validation(tag_ws, "F2:F1000", ["TRUE", "FALSE"])
     _add_validation(tag_ws, "G2:G1000", ["TRUE", "FALSE"])
-    _add_validation(tag_ws, "I2:I1000", EXPORT_USES)
+    _add_validation(tag_ws, "H2:H1000", ["TRUE", "FALSE"])
+    _add_validation(tag_ws, "J2:J1000", TAG_SCOPES)
+    _add_validation(tag_ws, "K2:K1000", ["TRUE", "FALSE"])
+    _add_validation(tag_ws, "M2:M1000", EXPORT_USES)
+
+    facility_ws = wb.create_sheet(FACILITY_TYPES_SHEET)
+    facility_ws.append(["facility_type"])
+    for facility_type in DEFAULT_FACILITY_TYPES:
+        facility_ws.append([facility_type])
+    _style_sheet(facility_ws, ["facility_type"])
+
+    outcome_ws = wb.create_sheet(OUTCOME_SHEET)
+    outcome_ws.append(OUTCOME_COLUMNS)
+    for outcome in outcomes or []:
+        outcome_ws.append([outcome.get("label", ""), outcome.get("severity_rank", 0)])
+    _style_sheet(outcome_ws, OUTCOME_COLUMNS)
+
+    scoring_ws = wb.create_sheet(SCORING_SHEET)
+    scoring_ws.append(SCORING_COLUMNS)
+    for record in scoring or []:
+        scoring_ws.append(
+            [
+                _join(record.get(column, [])) if column in {"memo_types", "facility_types"} else record.get(column, "")
+                for column in SCORING_COLUMNS
+            ]
+        )
+    _style_sheet(scoring_ws, SCORING_COLUMNS)
+
+    evidence_ws = wb.create_sheet(EVIDENCE_RULES_SHEET)
+    evidence_ws.append(["rule", "setting"])
+    evidence_ws.append(["material_tags_require_exact_evidence", "TRUE"])
+    evidence_ws.append(["unresolved_text_warnings_block_export", "TRUE"])
+    _style_sheet(evidence_ws, ["rule", "setting"])
+
+    export_ws = wb.create_sheet(EXPORT_MAPPING_SHEET)
+    export_ws.append(["export_name", "description"])
+    export_ws.append(["normalized_dataset", "Authoritative dataset used to derive training files."])
+    export_ws.append(["span_level_jsonl", "Evidence span plus tag examples."])
+    export_ws.append(["section_level_jsonl", "Section context plus normalized tags."])
+    export_ws.append(["memo_level_jsonl", "Whole memo synthesis and score examples."])
+    _style_sheet(export_ws, ["export_name", "description"])
 
     output = BytesIO()
     wb.save(output)
@@ -301,6 +378,15 @@ def _parse_tags(wb) -> list[TagDefinition]:
         export_use = str(row.get("export_use") or "both").strip()
         if export_use not in EXPORT_USES:
             raise ValueError(f"Row {row_number}: export_use must be one of: {', '.join(EXPORT_USES)}.")
+        allowed_scopes = _split_list(row.get("allowed_scopes")) or ["section"]
+        invalid_scopes = [scope for scope in allowed_scopes if scope not in TAG_SCOPES]
+        if invalid_scopes:
+            raise ValueError(f"Row {row_number}: allowed_scopes contains invalid value(s): {', '.join(invalid_scopes)}.")
+        default_scope = str(row.get("default_scope") or allowed_scopes[0]).strip()
+        if default_scope not in TAG_SCOPES:
+            raise ValueError(f"Row {row_number}: default_scope must be one of: {', '.join(TAG_SCOPES)}.")
+        if default_scope not in allowed_scopes:
+            allowed_scopes.append(default_scope)
         tags.append(
             TagDefinition(
                 tag_id=tag_id,
@@ -310,6 +396,10 @@ def _parse_tags(wb) -> list[TagDefinition]:
                 allowed_values=_split_list(row.get("allowed_values")),
                 required=_parse_bool(row.get("required"), "required", row_number),
                 evidence_required=_parse_bool(row.get("evidence_required"), "evidence_required", row_number),
+                material=_parse_bool(row.get("material"), "material", row_number),
+                allowed_scopes=allowed_scopes,  # type: ignore[arg-type]
+                default_scope=default_scope,  # type: ignore[arg-type]
+                facility_required=_parse_bool(row.get("facility_required"), "facility_required", row_number),
                 scoring_use=str(row.get("scoring_use") or "").strip(),
                 export_use=export_use,  # type: ignore[arg-type]
                 help_text=str(row.get("help_text") or "").strip(),
@@ -321,6 +411,45 @@ def _parse_tags(wb) -> list[TagDefinition]:
     return tags
 
 
+def _parse_outcomes(wb) -> list[dict[str, Any]] | None:
+    if OUTCOME_SHEET not in wb.sheetnames:
+        return None
+    rows = _worksheet_rows(wb, OUTCOME_SHEET, OUTCOME_COLUMNS)
+    outcomes = []
+    for row in rows:
+        if not row.get("label"):
+            continue
+        outcomes.append({"label": str(row.get("label")).strip(), "severity_rank": _parse_int(row.get("severity_rank"), "severity_rank", int(row["_row_number"]), 0)})
+    return outcomes
+
+
+def _parse_scoring(wb) -> list[dict[str, Any]] | None:
+    if SCORING_SHEET not in wb.sheetnames:
+        return None
+    rows = _worksheet_rows(wb, SCORING_SHEET, SCORING_COLUMNS)
+    scoring = []
+    for row in rows:
+        if not row.get("score_name") or not row.get("component_tag_id"):
+            continue
+        row_number = int(row["_row_number"])
+        scoring.append(
+            {
+                "score_name": str(row.get("score_name")).strip(),
+                "component_tag_id": str(row.get("component_tag_id")).strip(),
+                "weight": float(row.get("weight") or 0),
+                "directionality": str(row.get("directionality") or "higher_is_better"),
+                "min_value": float(row.get("min_value") or 0),
+                "max_value": float(row.get("max_value") or 100),
+                "required_evidence": _parse_bool(row.get("required_evidence"), "required_evidence", row_number, True),
+                "memo_types": _split_list(row.get("memo_types")),
+                "facility_types": _split_list(row.get("facility_types")),
+                "active": _parse_bool(row.get("active"), "active", row_number, True),
+                "version": str(row.get("version") or SCHEMA_VERSION),
+            }
+        )
+    return scoring
+
+
 def import_tag_setup_workbook(
     workbook_bytes: bytes,
     current_sections: list[SectionDefinition],
@@ -328,6 +457,8 @@ def import_tag_setup_workbook(
     *,
     update_sections: bool,
     update_tags: bool,
+    update_outcomes: bool = False,
+    update_scoring: bool = False,
 ) -> TagSetupImportResult:
     wb = load_workbook(BytesIO(workbook_bytes), data_only=True)
     result = TagSetupImportResult()
@@ -336,6 +467,10 @@ def import_tag_setup_workbook(
         result.sections = _parse_sections(wb)
     if update_tags:
         result.tags = _parse_tags(wb)
+    if update_outcomes:
+        result.outcomes = _parse_outcomes(wb)
+    if update_scoring:
+        result.scoring = _parse_scoring(wb)
 
     final_sections = result.sections if result.sections is not None else current_sections
     final_tags = result.tags if result.tags is not None else current_tags

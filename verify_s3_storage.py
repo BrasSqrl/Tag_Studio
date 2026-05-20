@@ -105,11 +105,12 @@ def main() -> None:
         "tag-studio/mock/memos/memo_s3_mock_001/tags/tag_records.json",
         "tag-studio/mock/memos/memo_s3_mock_001/evidence/evidence_records.json",
         "tag-studio/mock/memos/memo_s3_mock_001/review/review_status.json",
-        "tag-studio/mock/memos/memo_s3_mock_001/audit/audit_log.jsonl",
     ]
     missing = [key for key in required_keys if key not in fake.objects]
     if missing:
         raise AssertionError(f"Missing S3 objects: {missing}")
+    if not any(key.startswith("tag-studio/mock/memos/memo_s3_mock_001/audit/events/") for key in fake.objects):
+        raise AssertionError("Missing S3 audit event objects.")
 
     shutil.rmtree(workspace)
     storage.ensure_workspace(workspace)

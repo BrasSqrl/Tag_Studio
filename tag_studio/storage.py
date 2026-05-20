@@ -7,11 +7,12 @@ import shutil
 from functools import lru_cache
 from pathlib import Path, PurePosixPath
 from typing import Any
+from uuid import uuid4
 
 from filelock import FileLock
 
-from .defaults import DEFAULT_SECTIONS, DEFAULT_TAGS, SCHEMA_VERSION
-from .models import MemoRecord, ReviewRecord, utc_now
+from .defaults import DEFAULT_OUTCOME_TAXONOMY, DEFAULT_SCORING_RUBRIC, DEFAULT_SECTIONS, DEFAULT_TAGS, SCHEMA_VERSION
+from .models import MemoLockRecord, MemoRecord, ReviewRecord, utc_now
 
 DEFAULT_WORKSPACE = Path(os.getenv("TAG_STUDIO_LOCAL_WORKSPACE", "tag_studio_workspace"))
 S3_INDEX_RELATIVE_PATH = "memos/index.json"
@@ -281,14 +282,18 @@ def read_json(path: Path, default: Any) -> Any:
             hydrate_path_from_remote(workspace, path)
     if not path.exists():
         return default
-    return json.loads(path.read_text(encoding="utf-8"))
+    lock = FileLock(str(path) + ".lock")
+    with lock:
+        return json.loads(path.read_text(encoding="utf-8"))
 
 
 def write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = FileLock(str(path) + ".lock")
     with lock:
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        temp_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        temp_path.replace(path)
     workspace = _workspace_for_path(path)
     if workspace:
         sync_path_to_remote(workspace, path)
@@ -302,6 +307,11 @@ def append_jsonl(path: Path, data: dict[str, Any]) -> None:
     workspace = _workspace_for_path(path)
     if workspace:
         sync_path_to_remote(workspace, path)
+
+
+def stable_hash(data: Any) -> str:
+    encoded = json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def file_sha256(path: Path) -> str:
@@ -327,13 +337,40 @@ def ensure_workspace(workspace: Path = DEFAULT_WORKSPACE) -> Path:
         write_json(section_path, [section.model_dump() for section in DEFAULT_SECTIONS])
     if not tag_path.exists():
         write_json(tag_path, [tag.model_dump() for tag in DEFAULT_TAGS])
+    outcome_path = config_dir / "outcome_taxonomy.json"
+    scoring_path = config_dir / "scoring_rubric.json"
+    if not outcome_path.exists():
+        write_json(outcome_path, DEFAULT_OUTCOME_TAXONOMY)
+    if not scoring_path.exists():
+        write_json(scoring_path, [record.model_dump() for record in DEFAULT_SCORING_RUBRIC])
     if not meta_path.exists():
-        write_json(meta_path, {"schema_version": SCHEMA_VERSION, "created_at": utc_now()})
+        write_json(
+            meta_path,
+            {
+                "schema_version": SCHEMA_VERSION,
+                "schema_hash": active_schema_hash(workspace),
+                "created_at": utc_now(),
+            },
+        )
     if using_s3_storage():
         (workspace / "memos").mkdir(parents=True, exist_ok=True)
         if not (workspace / S3_INDEX_RELATIVE_PATH).exists():
             write_json(workspace / S3_INDEX_RELATIVE_PATH, {"memo_ids": _remote_memo_ids(), "updated_at": utc_now()})
     return workspace
+
+
+def active_schema_payload(workspace: Path) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "sections": read_json(config_path(workspace, "section_schema.json"), []),
+        "tags": read_json(config_path(workspace, "tag_schema.json"), []),
+        "outcome_taxonomy": read_json(config_path(workspace, "outcome_taxonomy.json"), []),
+        "scoring_rubric": read_json(config_path(workspace, "scoring_rubric.json"), []),
+    }
+
+
+def active_schema_hash(workspace: Path) -> str:
+    return stable_hash(active_schema_payload(workspace))
 
 
 def config_path(workspace: Path, name: str) -> Path:
@@ -355,7 +392,22 @@ def create_memo_workspace(
     reviewer: str,
 ) -> MemoRecord:
     base = memo_dir(workspace, memo_id)
-    for subdir in ["source", "pages", "extraction", "sections", "tags", "evidence", "review", "exports", "audit"]:
+    for subdir in [
+        "source",
+        "pages",
+        "extraction",
+        "sections",
+        "facilities",
+        "tags",
+        "evidence",
+        "outcomes",
+        "tables",
+        "review",
+        "exports",
+        "audit",
+        "audit/events",
+        "schema",
+    ]:
         (base / subdir).mkdir(parents=True, exist_ok=True)
 
     source_pdf = base / "source" / "source.pdf"
@@ -372,10 +424,34 @@ def create_memo_workspace(
         memo_type=memo_type,
         facility_type=facility_type,
         borrower_name_or_hash=borrower_name_or_hash,
+        borrower_id=slugify(borrower_name_or_hash) if borrower_name_or_hash else "",
         reviewer=reviewer,
+        schema_version=SCHEMA_VERSION,
+        schema_hash=active_schema_hash(workspace),
     )
     write_json(base / "memo_record.json", record.model_dump())
-    write_json(base / "review" / "review_status.json", ReviewRecord(memo_id=memo_id, reviewer=reviewer).model_dump())
+    write_json(
+        base / "schema" / "schema_snapshot.json",
+        {
+            **active_schema_payload(workspace),
+            "schema_hash": record.schema_hash,
+            "created_at": utc_now(),
+        },
+    )
+    write_json(
+        base / "review" / "review_status.json",
+        ReviewRecord(
+            memo_id=memo_id,
+            reviewer=reviewer,
+            assigned_to=reviewer,
+            assignment_status="Assigned to reviewer" if reviewer else "Unassigned",
+            schema_version=SCHEMA_VERSION,
+            schema_hash=record.schema_hash,
+        ).model_dump(),
+    )
+    write_json(base / "facilities" / "facility_records.json", [])
+    write_json(base / "outcomes" / "outcome_records.json", [])
+    write_json(base / "tables" / "table_metric_records.json", [])
     append_audit(workspace, memo_id, "memo_created", {"source_file_name": file_name})
     _update_memo_index(workspace, memo_id)
     return record
@@ -444,11 +520,68 @@ def save_evidence(workspace: Path, memo_id: str, evidence: list[dict[str, Any]])
     append_audit(workspace, memo_id, "evidence_saved", {"evidence_count": len(evidence)})
 
 
+def load_facilities(workspace: Path, memo_id: str) -> list[dict[str, Any]]:
+    return read_json(memo_dir(workspace, memo_id) / "facilities" / "facility_records.json", [])
+
+
+def save_facilities(workspace: Path, memo_id: str, facilities: list[dict[str, Any]]) -> None:
+    write_json(memo_dir(workspace, memo_id) / "facilities" / "facility_records.json", facilities)
+    append_audit(workspace, memo_id, "facilities_saved", {"facility_count": len(facilities)})
+
+
+def load_outcomes(workspace: Path, memo_id: str) -> list[dict[str, Any]]:
+    return read_json(memo_dir(workspace, memo_id) / "outcomes" / "outcome_records.json", [])
+
+
+def save_outcomes(workspace: Path, memo_id: str, outcomes: list[dict[str, Any]]) -> None:
+    write_json(memo_dir(workspace, memo_id) / "outcomes" / "outcome_records.json", outcomes)
+    append_audit(workspace, memo_id, "outcomes_saved", {"outcome_count": len(outcomes)})
+
+
+def load_table_metrics(workspace: Path, memo_id: str) -> list[dict[str, Any]]:
+    return read_json(memo_dir(workspace, memo_id) / "tables" / "table_metric_records.json", [])
+
+
+def save_table_metrics(workspace: Path, memo_id: str, metrics: list[dict[str, Any]]) -> None:
+    write_json(memo_dir(workspace, memo_id) / "tables" / "table_metric_records.json", metrics)
+    append_audit(workspace, memo_id, "table_metrics_saved", {"metric_count": len(metrics)})
+
+
+def load_scoring_rubric(workspace: Path) -> list[dict[str, Any]]:
+    return read_json(config_path(workspace, "scoring_rubric.json"), [])
+
+
+def save_scoring_rubric(workspace: Path, records: list[dict[str, Any]]) -> None:
+    write_json(config_path(workspace, "scoring_rubric.json"), records)
+
+
 def append_audit(workspace: Path, memo_id: str, event_type: str, payload: dict[str, Any]) -> None:
-    append_jsonl(
-        memo_dir(workspace, memo_id) / "audit" / "audit_log.jsonl",
-        {"memo_id": memo_id, "event_type": event_type, "payload": payload, "created_at": utc_now()},
-    )
+    event_id = uuid4().hex
+    event = {"event_id": event_id, "memo_id": memo_id, "event_type": event_type, "payload": payload, "created_at": utc_now()}
+    write_json(memo_dir(workspace, memo_id) / "audit" / "events" / f"{event['created_at'].replace(':', '').replace('.', '')}_{event_id}.json", event)
+
+
+def load_audit_events(workspace: Path, memo_id: str) -> list[dict[str, Any]]:
+    events_dir = memo_dir(workspace, memo_id) / "audit" / "events"
+    hydrate_prefix_from_remote(workspace, f"memos/{memo_id}/audit/events")
+    if not events_dir.exists():
+        return []
+    events = [read_json(path, {}) for path in sorted(events_dir.glob("*.json"))]
+    return [event for event in events if event]
+
+
+def load_active_lock(workspace: Path, memo_id: str) -> dict[str, Any]:
+    return read_json(memo_dir(workspace, memo_id) / "review" / "active_lock.json", {})
+
+
+def save_active_lock(workspace: Path, memo_id: str, lock: MemoLockRecord) -> None:
+    write_json(memo_dir(workspace, memo_id) / "review" / "active_lock.json", lock.model_dump())
+
+
+def clear_active_lock(workspace: Path, memo_id: str) -> None:
+    path = memo_dir(workspace, memo_id) / "review" / "active_lock.json"
+    write_json(path, {})
+    append_audit(workspace, memo_id, "memo_lock_cleared", {})
 
 
 def reset_demo_workspace(workspace: Path) -> None:

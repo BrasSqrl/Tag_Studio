@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import streamlit as st
 
@@ -17,14 +18,17 @@ from tag_studio.pages.reviewer import (
     download_results_page,
     quality_check_page,
     review_text_quality_page,
+    set_up_facilities_page,
     tag_credit_review_page,
+    tag_outcomes_page,
 )
-from tag_studio.services import MemoReadService, WorkflowService
+from tag_studio.services import MemoReadService, WorkflowService, acquire_or_refresh_lock
 from tag_studio.storage import (
     DEFAULT_WORKSPACE,
     ensure_workspace,
     hydrate_memo_from_remote,
     list_memo_ids,
+    load_memo_record,
     storage_readiness,
 )
 from tag_studio.ui_components import show_header, show_progress
@@ -72,8 +76,12 @@ def route_reviewer_page(workspace: Path, active_memo_id: str | None, selected_st
         review_text_quality_page(workspace, active_memo_id)
     elif selected_step == "Confirm Sections":
         confirm_sections_page(workspace, active_memo_id)
+    elif selected_step == "Set Up Facilities":
+        set_up_facilities_page(workspace, active_memo_id)
     elif selected_step == "Tag Credit Review":
         tag_credit_review_page(workspace, active_memo_id)
+    elif selected_step == "Tag Outcomes":
+        tag_outcomes_page(workspace, active_memo_id)
     elif selected_step == "Quality Check":
         quality_check_page(workspace, active_memo_id)
     elif selected_step == "Download Results":
@@ -102,6 +110,20 @@ def main() -> None:
 
     selected_step = st.sidebar.radio("Review Steps", WIZARD_STEPS, index=WIZARD_STEPS.index(default_step))
     st.session_state["selected_step"] = selected_step
+    if active_memo_id and selected_step not in {"Add Memo", "Download Results"}:
+        session_id = st.session_state.setdefault("tag_studio_session_id", f"session_{uuid4().hex[:12]}")
+        memo = load_memo_record(workspace, active_memo_id)
+        ok, message, lock = acquire_or_refresh_lock(
+            workspace,
+            active_memo_id,
+            session_id=session_id,
+            owner_name=str(memo.get("reviewer") or "Current reviewer"),
+            current_step=selected_step,
+        )
+        if not ok:
+            st.warning(message)
+            st.caption(f"Lock expires at {lock.get('expires_at', 'unknown')}. Ask an admin to clear a stale lock if needed.")
+            return
     show_progress(selected_step, statuses)
     route_reviewer_page(workspace, active_memo_id, selected_step)
 

@@ -24,7 +24,7 @@ body { background: #f6f8fb; }
 .tag-title p { margin: .35rem 0 0 0; color: #dcebf5; }
 .progress-wrap {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
   gap: .65rem;
   margin: .8rem 0 1.1rem 0;
 }

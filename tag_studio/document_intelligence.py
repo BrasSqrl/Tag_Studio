@@ -244,6 +244,10 @@ def load_extraction_warnings(workspace: Path, memo_id: str) -> list[dict[str, An
     return read_json(memo_dir(workspace, memo_id) / "extraction" / "ocr_warnings.json", [])
 
 
+def save_extraction_warnings(workspace: Path, memo_id: str, records: list[dict[str, Any]]) -> None:
+    write_json(memo_dir(workspace, memo_id) / "extraction" / "ocr_warnings.json", records)
+
+
 def load_section_candidates(workspace: Path, memo_id: str) -> list[dict[str, Any]]:
     return read_json(memo_dir(workspace, memo_id) / "sections" / "section_candidates.json", [])
 

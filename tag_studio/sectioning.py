@@ -164,6 +164,8 @@ def propose_sections(
                 original_header="Full memo text",
                 page_start=1,
                 page_end=max([int(page.get("page_number", 1)) for page in pages], default=1),
+                line_start=1,
+                line_end=max((len(page.get("text", "").splitlines()) for page in pages), default=1),
                 text=full_text,
                 extraction_method=extraction_method,  # type: ignore[arg-type]
                 reviewer_confirmed=False,
@@ -176,9 +178,11 @@ def propose_sections(
         if idx < len(ordered_found):
             next_page, next_line_idx = ordered_found[idx][0], ordered_found[idx][1]
             page_end = next_page
+            line_end = next_line_idx
             section_text = _slice_section_text(page_lines, page_number, line_idx, next_page, next_line_idx)
         else:
             page_end = max_page
+            line_end = len(page_lines.get(max_page, []))
             section_text = _slice_section_text(page_lines, page_number, line_idx, max_page, None)
         sections.append(
             SectionRecord(
@@ -189,6 +193,8 @@ def propose_sections(
                 original_header=header,
                 page_start=page_number,
                 page_end=page_end,
+                line_start=line_idx + 1,
+                line_end=max(line_end, line_idx + 1),
                 text=section_text,
                 extraction_method=extraction_method,  # type: ignore[arg-type]
                 reviewer_confirmed=False,

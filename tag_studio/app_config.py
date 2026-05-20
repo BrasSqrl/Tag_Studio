@@ -9,7 +9,9 @@ WIZARD_STEPS = [
     "Add Memo",
     "Review Text Quality",
     "Confirm Sections",
+    "Set Up Facilities",
     "Tag Credit Review",
+    "Tag Outcomes",
     "Quality Check",
     "Download Results",
 ]
@@ -20,6 +22,7 @@ STATUS_LABELS = {
     "Changes Requested": "Changes Needed",
     "Approved Gold": "Approved for Training Dataset",
     "Exported": "Downloaded",
+    "Needs Revalidation": "Needs Revalidation",
 }
 
 TAG_CATEGORY_ORDER = [

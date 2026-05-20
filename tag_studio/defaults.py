@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from .models import SectionDefinition, TagDefinition
+from .models import ScoringRubricRecord, SectionDefinition, TagDefinition
 
-SCHEMA_VERSION = "tag_studio_craig_v1"
+SCHEMA_VERSION = "tag_studio_craig_v2"
 
 
 DEFAULT_MEMO_TYPES = [
@@ -25,6 +25,33 @@ DEFAULT_FACILITY_TYPES = [
     "LOC",
     "Multiple",
     "Other",
+]
+
+DEFAULT_OUTCOME_TAXONOMY = [
+    {"label": "Unknown / Not seasoned yet", "severity_rank": 0},
+    {"label": "No adverse outcome / performing", "severity_rank": 1},
+    {"label": "Covenant breach", "severity_rank": 3},
+    {"label": "Payment delinquency", "severity_rank": 4},
+    {"label": "Risk rating downgrade", "severity_rank": 4},
+    {"label": "Watchlist / criticized / classified", "severity_rank": 5},
+    {"label": "Forbearance or amendment due to stress", "severity_rank": 6},
+    {"label": "Workout / restructuring", "severity_rank": 7},
+    {"label": "Nonaccrual", "severity_rank": 8},
+    {"label": "Default", "severity_rank": 9},
+    {"label": "Charge-off / realized loss", "severity_rank": 10},
+    {"label": "Bankruptcy / liquidation", "severity_rank": 10},
+]
+
+DEFAULT_SCORING_RUBRIC = [
+    ScoringRubricRecord(score_name="completeness_score", component_tag_id="memo_readiness", weight=30, version=SCHEMA_VERSION),
+    ScoringRubricRecord(score_name="completeness_score", component_tag_id="required_section_status", weight=40, version=SCHEMA_VERSION),
+    ScoringRubricRecord(score_name="completeness_score", component_tag_id="decision_blocker", weight=30, version=SCHEMA_VERSION, directionality="lower_is_better"),
+    ScoringRubricRecord(score_name="underwriting_strength_score", component_tag_id="repayment_support_strength", weight=25, version=SCHEMA_VERSION),
+    ScoringRubricRecord(score_name="underwriting_strength_score", component_tag_id="cash_flow_metric_quality", weight=15, version=SCHEMA_VERSION),
+    ScoringRubricRecord(score_name="underwriting_strength_score", component_tag_id="leverage_risk", weight=15, version=SCHEMA_VERSION, directionality="lower_is_better"),
+    ScoringRubricRecord(score_name="underwriting_strength_score", component_tag_id="liquidity_support", weight=15, version=SCHEMA_VERSION),
+    ScoringRubricRecord(score_name="underwriting_strength_score", component_tag_id="covenant_package_strength", weight=15, version=SCHEMA_VERSION),
+    ScoringRubricRecord(score_name="underwriting_strength_score", component_tag_id="collateral_support_strength", weight=15, version=SCHEMA_VERSION),
 ]
 
 
@@ -157,6 +184,8 @@ DEFAULT_TAGS = [
         data_type="boolean",
         required=True,
         evidence_required=True,
+        material=True,
+        allowed_scopes=["memo", "section"],
         help_text="Whether missing or weak information blocks a credit view.",
     ),
     TagDefinition(
@@ -167,6 +196,7 @@ DEFAULT_TAGS = [
         allowed_values=["Present complete", "Present incomplete", "Missing", "N/A", "Unclear"],
         required=True,
         evidence_required=True,
+        material=True,
         help_text="Completeness of the selected canonical section.",
     ),
     TagDefinition(
@@ -177,6 +207,7 @@ DEFAULT_TAGS = [
         allowed_values=["None", "Low", "Moderate", "High", "Critical"],
         required=True,
         evidence_required=True,
+        material=True,
     ),
     TagDefinition(
         tag_id="rco_follow_up_questions",
@@ -193,6 +224,10 @@ DEFAULT_TAGS = [
         data_type="text",
         required=False,
         evidence_required=True,
+        material=True,
+        allowed_scopes=["memo", "facility", "section"],
+        default_scope="facility",
+        facility_required=True,
     ),
     TagDefinition(
         tag_id="industry_business_model",
@@ -226,6 +261,10 @@ DEFAULT_TAGS = [
         data_type="number",
         required=False,
         evidence_required=True,
+        material=True,
+        allowed_scopes=["facility", "section"],
+        default_scope="facility",
+        facility_required=True,
         scoring_use="underwriting_strength_score",
         help_text="0-5 score where 5 is strongest support.",
     ),
@@ -236,6 +275,10 @@ DEFAULT_TAGS = [
         data_type="enum",
         allowed_values=["Strong", "Adequate", "Weak", "Missing", "Unclear"],
         evidence_required=True,
+        material=True,
+        allowed_scopes=["facility", "section"],
+        default_scope="facility",
+        facility_required=True,
     ),
     TagDefinition(
         tag_id="addback_quality",
@@ -244,6 +287,7 @@ DEFAULT_TAGS = [
         data_type="enum",
         allowed_values=["Well supported", "Partially supported", "Aggressive", "Missing", "N/A"],
         evidence_required=True,
+        material=True,
     ),
     TagDefinition(
         tag_id="sensitivity_quality",
@@ -252,6 +296,10 @@ DEFAULT_TAGS = [
         data_type="enum",
         allowed_values=["Strong", "Adequate", "Weak", "Missing", "N/A"],
         evidence_required=True,
+        material=True,
+        allowed_scopes=["facility", "section"],
+        default_scope="facility",
+        facility_required=True,
     ),
     TagDefinition(
         tag_id="projection_reasonableness",
@@ -260,6 +308,10 @@ DEFAULT_TAGS = [
         data_type="enum",
         allowed_values=["Reasonable", "Somewhat aggressive", "Aggressive", "Unsupported", "N/A"],
         evidence_required=True,
+        material=True,
+        allowed_scopes=["facility", "section"],
+        default_scope="facility",
+        facility_required=True,
     ),
     TagDefinition(
         tag_id="leverage_risk",
@@ -268,6 +320,10 @@ DEFAULT_TAGS = [
         data_type="enum",
         allowed_values=["Low", "Moderate", "Elevated", "High", "Unclear"],
         evidence_required=True,
+        material=True,
+        allowed_scopes=["facility", "section"],
+        default_scope="facility",
+        facility_required=True,
     ),
     TagDefinition(
         tag_id="liquidity_support",
@@ -276,6 +332,10 @@ DEFAULT_TAGS = [
         data_type="enum",
         allowed_values=["Strong", "Adequate", "Weak", "Insufficient", "Unclear"],
         evidence_required=True,
+        material=True,
+        allowed_scopes=["facility", "section"],
+        default_scope="facility",
+        facility_required=True,
     ),
     TagDefinition(
         tag_id="performance_trend",
@@ -284,6 +344,10 @@ DEFAULT_TAGS = [
         data_type="enum",
         allowed_values=["Improving", "Stable", "Declining", "Volatile", "Unclear"],
         evidence_required=True,
+        material=True,
+        allowed_scopes=["facility", "section"],
+        default_scope="facility",
+        facility_required=True,
     ),
     TagDefinition(
         tag_id="concentration_risk",
@@ -292,6 +356,10 @@ DEFAULT_TAGS = [
         data_type="enum",
         allowed_values=["Low", "Moderate", "Elevated", "High", "Unclear"],
         evidence_required=True,
+        material=True,
+        allowed_scopes=["facility", "section"],
+        default_scope="facility",
+        facility_required=True,
     ),
     TagDefinition(
         tag_id="working_capital_risk",
@@ -300,6 +368,10 @@ DEFAULT_TAGS = [
         data_type="enum",
         allowed_values=["Low", "Moderate", "Elevated", "High", "N/A", "Unclear"],
         evidence_required=True,
+        material=True,
+        allowed_scopes=["facility", "section"],
+        default_scope="facility",
+        facility_required=True,
     ),
     TagDefinition(
         tag_id="management_quality",
@@ -451,6 +523,8 @@ DEFAULT_TAGS = [
         category="Scoring",
         data_type="number",
         required=False,
+        allowed_scopes=["memo"],
+        default_scope="memo",
         scoring_use="completeness_score",
         help_text="0-100 advisory score.",
     ),
@@ -460,6 +534,8 @@ DEFAULT_TAGS = [
         category="Scoring",
         data_type="number",
         required=False,
+        allowed_scopes=["memo", "facility"],
+        default_scope="facility",
         scoring_use="underwriting_strength_score",
         help_text="0-100 advisory score.",
     ),
@@ -469,6 +545,8 @@ DEFAULT_TAGS = [
         category="Outcome",
         data_type="enum",
         allowed_values=["Performing", "Covenant breach", "Past due", "Criticized", "Non-accrual", "Default", "Charge-off", "Refinanced out", "Unknown"],
+        allowed_scopes=["outcome", "facility"],
+        default_scope="outcome",
         export_use="memo",
         help_text="Use only when outcome data is available and review boundary is clear.",
     ),

@@ -12,8 +12,12 @@ from tag_studio.extraction import tesseract_available
 from tag_studio.models import SectionDefinition, TagDefinition
 from tag_studio.schema_workbook import create_tag_setup_workbook, import_tag_setup_workbook
 from tag_studio.services import (
+    load_outcome_taxonomy,
+    load_scoring_rubric,
     load_section_defs,
     load_tag_defs,
+    save_outcome_taxonomy,
+    save_scoring_rubric_defs,
     save_section_defs,
     save_tag_defs,
     schema_usage_warnings,
@@ -27,6 +31,8 @@ def schema_page(workspace: Path) -> None:
 
     section_defs = load_section_defs(workspace)
     tag_defs = load_tag_defs(workspace)
+    outcome_taxonomy = load_outcome_taxonomy(workspace)
+    scoring_rubric = load_scoring_rubric(workspace)
     import_message = st.session_state.pop("tag_setup_import_message", "")
     import_warning_messages = st.session_state.pop("tag_setup_import_warnings", [])
     if import_message:
@@ -35,13 +41,13 @@ def schema_page(workspace: Path) -> None:
         st.warning(warning)
 
     st.markdown("##### Excel Template Update")
-    st.caption("Download the current setup, edit it in Excel, then upload it back to update sections and tags in bulk.")
+    st.caption("Download the current setup, edit it in Excel, then upload it back to update sections, tags, outcome labels, and scoring rules in bulk.")
     template_state_key = "tag_setup_template_bytes"
     if st.button(
         "Prepare Tag Setup Template",
         help="Create the editable workbook from the current standard memo sections and credit tags.",
     ):
-        st.session_state[template_state_key] = create_tag_setup_workbook(section_defs, tag_defs)
+        st.session_state[template_state_key] = create_tag_setup_workbook(section_defs, tag_defs, outcome_taxonomy, scoring_rubric)
     if template_state_key in st.session_state:
         st.download_button(
             "Download Tag Setup Template",
@@ -56,12 +62,16 @@ def schema_page(workspace: Path) -> None:
         key="tag_setup_workbook_upload",
         help="Upload the edited template. Keep the sheet names and header rows unchanged.",
     )
-    update_col1, update_col2, update_col3 = st.columns([1, 1, 1.2])
+    update_col1, update_col2, update_col3, update_col4, update_col5 = st.columns([1, 1, 1, 1, 1.2])
     with update_col1:
         update_sections = st.checkbox("Update Standard Memo Sections", value=True)
     with update_col2:
         update_tags = st.checkbox("Update Credit Tags", value=True)
     with update_col3:
+        update_outcomes = st.checkbox("Update Outcome Labels", value=True)
+    with update_col4:
+        update_scoring = st.checkbox("Update Scoring Rules", value=True)
+    with update_col5:
         apply_setup = st.button(
             "Apply Uploaded Tag Setup",
             type="primary",
@@ -70,7 +80,7 @@ def schema_page(workspace: Path) -> None:
         )
 
     if apply_setup:
-        if not update_sections and not update_tags:
+        if not update_sections and not update_tags and not update_outcomes and not update_scoring:
             st.error("Choose at least one setup area to update.")
         elif uploaded_setup is None:
             st.error("Upload an edited tag setup workbook first.")
@@ -82,6 +92,8 @@ def schema_page(workspace: Path) -> None:
                     tag_defs,
                     update_sections=update_sections,
                     update_tags=update_tags,
+                    update_outcomes=update_outcomes,
+                    update_scoring=update_scoring,
                 )
                 import_warnings = schema_usage_warnings(workspace, section_defs, tag_defs, imported.sections, imported.tags)
                 if imported.sections is not None:
@@ -90,14 +102,23 @@ def schema_page(workspace: Path) -> None:
                 if imported.tags is not None:
                     save_tag_defs(workspace, imported.tags)
                     tag_defs = imported.tags
+                if imported.outcomes is not None:
+                    save_outcome_taxonomy(workspace, imported.outcomes)
+                    outcome_taxonomy = imported.outcomes
+                if imported.scoring is not None:
+                    save_scoring_rubric_defs(workspace, imported.scoring)
+                    scoring_rubric = imported.scoring
                 st.session_state.pop(template_state_key, None)
-                st.session_state["tag_setup_import_message"] = f"Tag setup updated. Sections: {len(section_defs)}. Credit tags: {len(tag_defs)}."
+                st.session_state["tag_setup_import_message"] = (
+                    f"Tag setup updated. Sections: {len(section_defs)}. Credit tags: {len(tag_defs)}. "
+                    f"Outcome labels: {len(outcome_taxonomy)}. Scoring rules: {len(scoring_rubric)}."
+                )
                 st.session_state["tag_setup_import_warnings"] = [*imported.warnings, *import_warnings]
                 st.rerun()
             except Exception as exc:  # noqa: BLE001 - convert workbook errors to admin-facing guidance.
                 st.error(f"Tag setup workbook could not be applied: {exc}")
 
-    tab_sections, tab_tags = st.tabs(["Standard Memo Sections", "Credit Tags"])
+    tab_sections, tab_tags, tab_outcomes, tab_scoring = st.tabs(["Standard Memo Sections", "Credit Tags", "Outcome Labels", "Scoring Rules"])
     with tab_sections:
         rows = [
             {
@@ -150,6 +171,10 @@ def schema_page(workspace: Path) -> None:
                 "scoring_use": definition.scoring_use,
                 "export_use": definition.export_use,
                 "help_text": definition.help_text,
+                "material": definition.material,
+                "allowed_scopes": "; ".join(definition.allowed_scopes),
+                "default_scope": definition.default_scope,
+                "facility_required": definition.facility_required,
             }
             for definition in tag_defs
         ]
@@ -174,6 +199,10 @@ def schema_page(workspace: Path) -> None:
                         allowed_values=[item.strip() for item in str(row.get("allowed_values", "")).split(";") if item.strip()],
                         required=bool(row.get("required")),
                         evidence_required=bool(row.get("evidence_required")),
+                        material=bool(row.get("material")),
+                        allowed_scopes=[item.strip() for item in str(row.get("allowed_scopes", "section")).split(";") if item.strip()] or ["section"],  # type: ignore[arg-type]
+                        default_scope=str(row.get("default_scope") or "section"),  # type: ignore[arg-type]
+                        facility_required=bool(row.get("facility_required")),
                         scoring_use=str(row.get("scoring_use") or ""),
                         export_use=export_use,  # type: ignore[arg-type]
                         help_text=str(row.get("help_text") or ""),
@@ -181,6 +210,43 @@ def schema_page(workspace: Path) -> None:
                 )
             save_tag_defs(workspace, new_tags)
             st.success("Credit tags saved.")
+
+    with tab_outcomes:
+        edited = st.data_editor(pd.DataFrame(outcome_taxonomy), num_rows="dynamic", width="stretch", key="outcome_taxonomy_editor")
+        if st.button("Save Outcome Labels", type="primary"):
+            records = []
+            for row in edited.fillna("").to_dict("records"):
+                label = str(row.get("label") or "").strip()
+                if not label:
+                    continue
+                records.append({"label": label, "severity_rank": int(row.get("severity_rank") or 0)})
+            save_outcome_taxonomy(workspace, records)
+            st.success("Outcome labels saved.")
+
+    with tab_scoring:
+        edited = st.data_editor(pd.DataFrame(scoring_rubric), num_rows="dynamic", width="stretch", key="scoring_rubric_editor")
+        if st.button("Save Scoring Rules", type="primary"):
+            records = []
+            for row in edited.fillna("").to_dict("records"):
+                if not row.get("score_name") or not row.get("component_tag_id"):
+                    continue
+                records.append(
+                    {
+                        "score_name": str(row.get("score_name")),
+                        "component_tag_id": str(row.get("component_tag_id")),
+                        "weight": float(row.get("weight") or 0),
+                        "directionality": str(row.get("directionality") or "higher_is_better"),
+                        "min_value": float(row.get("min_value") or 0),
+                        "max_value": float(row.get("max_value") or 100),
+                        "required_evidence": bool(row.get("required_evidence")),
+                        "memo_types": [item.strip() for item in str(row.get("memo_types", "")).split(";") if item.strip()],
+                        "facility_types": [item.strip() for item in str(row.get("facility_types", "")).split(";") if item.strip()],
+                        "active": bool(row.get("active", True)),
+                        "version": str(row.get("version") or SCHEMA_VERSION),
+                    }
+                )
+            save_scoring_rubric_defs(workspace, records)
+            st.success("Scoring rules saved.")
 
 
 def diagnostics_page(workspace: Path) -> None:

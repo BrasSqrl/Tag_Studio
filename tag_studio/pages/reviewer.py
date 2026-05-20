@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from tag_studio.app_config import STATUS_LABELS, TAG_CATEGORY_ORDER
-from tag_studio.defaults import DEFAULT_FACILITY_TYPES, DEFAULT_MEMO_TYPES
+from tag_studio.defaults import DEFAULT_FACILITY_TYPES, DEFAULT_MEMO_TYPES, DEFAULT_OUTCOME_TAXONOMY, SCHEMA_VERSION
 from tag_studio.document_intelligence import (
     dependency_status,
     load_extraction_warnings,
@@ -17,12 +17,14 @@ from tag_studio.document_intelligence import (
     load_page_text,
     load_section_candidates,
     run_document_intelligence,
+    save_extraction_warnings,
     save_page_quality,
     save_page_text,
     summarize_page_quality,
 )
 from tag_studio.exporters import export_excel, export_jsonl, export_memo_bundle
-from tag_studio.models import EvidenceRecord, TagDefinition, TagRecord, utc_now
+from tag_studio.extraction import pdf_page_count
+from tag_studio.models import EvidenceRecord, FacilityRecord, OutcomeRecord, TagDefinition, TagRecord, utc_now
 from tag_studio.sectioning import propose_sections, required_section_gaps
 from tag_studio.services import (
     candidate_for_section,
@@ -36,24 +38,99 @@ from tag_studio.services import (
     text_quality_complete,
 )
 from tag_studio.storage import (
+    active_schema_hash,
+    active_schema_payload,
     append_audit,
     create_memo_workspace,
     list_memo_ids,
     load_evidence,
+    load_facilities,
     load_memo_record,
+    load_outcomes,
     load_review,
     load_sections,
     load_tags,
     memo_dir,
     read_json,
     save_evidence,
+    save_facilities,
     save_memo_record,
+    save_outcomes,
     save_review,
     save_sections,
     save_tags,
     slugify,
+    write_json,
 )
 from tag_studio.ui_components import badge, blocked_step, extraction_message, go_to_step
+
+MAX_UPLOAD_MB = 50
+MAX_PDF_PAGES = 250
+
+
+def _preflight_upload(workspace: Path, file_name: str, pdf_bytes: bytes) -> tuple[bool, str]:
+    if len(pdf_bytes) > MAX_UPLOAD_MB * 1024 * 1024:
+        return False, f"PDF is larger than the {MAX_UPLOAD_MB} MB limit."
+    preflight_dir = workspace / "_preflight"
+    preflight_dir.mkdir(parents=True, exist_ok=True)
+    preflight_path = preflight_dir / f"{uuid4().hex}_{slugify(Path(file_name).stem)}.pdf"
+    try:
+        preflight_path.write_bytes(pdf_bytes)
+        page_count = pdf_page_count(preflight_path)
+    except Exception as exc:  # noqa: BLE001 - keep intake message user-facing.
+        return False, f"Tag Studio could not inspect this PDF before upload: {exc}"
+    finally:
+        if preflight_path.exists():
+            preflight_path.unlink()
+    if page_count > MAX_PDF_PAGES:
+        return False, f"PDF has {page_count} pages. The current limit is {MAX_PDF_PAGES} pages."
+    return True, ""
+
+
+def _suggest_facilities(memo_id: str, borrower_id: str, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    keywords = {
+        "Revolver": ["revolver", "revolving", "line of credit"],
+        "Term Loan": ["term loan"],
+        "ABL": ["abl", "asset based", "borrowing base"],
+        "CRE": ["cre", "commercial real estate", "real estate"],
+        "Equipment": ["equipment"],
+        "Acquisition Finance": ["acquisition"],
+        "LOC": ["letter of credit", "loc"],
+    }
+    facilities: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for section in sections:
+        text = f"{section.get('canonical_section_name', '')}\n{section.get('text', '')}".lower()
+        for facility_type, terms in keywords.items():
+            if facility_type in seen:
+                continue
+            if any(term in text for term in terms):
+                seen.add(facility_type)
+                facilities.append(
+                    FacilityRecord(
+                        facility_id=f"facility_{slugify(facility_type)}",
+                        memo_id=memo_id,
+                        borrower_id=borrower_id,
+                        facility_name=facility_type,
+                        facility_type=facility_type,
+                        proposed_from_text=True,
+                        confidence=0.75,
+                        source_section_id=str(section.get("section_id", "")),
+                        source_evidence=str(section.get("text", ""))[:500],
+                    ).model_dump()
+                )
+    if not facilities:
+        facilities.append(
+            FacilityRecord(
+                facility_id="facility_primary",
+                memo_id=memo_id,
+                borrower_id=borrower_id,
+                facility_name="Primary Facility",
+                facility_type="Multiple",
+                confidence=0.25,
+            ).model_dump()
+        )
+    return facilities
 
 
 def add_memo_page(workspace: Path) -> None:
@@ -109,11 +186,16 @@ def add_memo_page(workspace: Path) -> None:
     if uploaded is None:
         st.error("Choose a credit memo PDF before continuing.")
         return
+    pdf_bytes = uploaded.getvalue()
+    ok, preflight_message = _preflight_upload(workspace, uploaded.name, pdf_bytes)
+    if not ok:
+        st.error(preflight_message)
+        return
 
     memo_id = f"memo_{slugify(Path(uploaded.name).stem)}_{uuid4().hex[:8]}"
     record = create_memo_workspace(
         workspace=workspace,
-        pdf_bytes=uploaded.getvalue(),
+        pdf_bytes=pdf_bytes,
         file_name=uploaded.name,
         memo_id=memo_id,
         memo_type=memo_type,
@@ -267,6 +349,22 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
             key=f"quality_notes_{memo_id}_{selected_page_number}",
             help="Use this for handwriting, unreadable text, or table issues.",
         )
+        disposition_options = ["Corrected", "Reviewed - acceptable", "Not material", "Unable to read", "Needs escalation"]
+        current_disposition = selected_record.get("disposition", "Reviewed - acceptable" if selected_record.get("status") == "Ready" else "Unresolved")
+        disposition = st.selectbox(
+            "Text quality disposition",
+            disposition_options,
+            index=disposition_options.index(current_disposition) if current_disposition in disposition_options else 1,
+            key=f"quality_disposition_{memo_id}_{selected_page_number}",
+            help="Every non-ready page needs a final disposition before approval.",
+        )
+        disposition_rationale = st.text_area(
+            "Disposition rationale",
+            value=selected_record.get("disposition_rationale", ""),
+            height=70,
+            key=f"quality_disposition_rationale_{memo_id}_{selected_page_number}",
+            help="Required when a page is unable to read, not material, or needs escalation.",
+        )
         col1, col2 = st.columns(2)
         with col1:
             if st.button(
@@ -276,15 +374,24 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
             ):
                 for record in page_text:
                     if int(record["page_number"]) == selected_page_number:
+                        record.setdefault("original_text", record.get("text", ""))
                         record["text"] = corrected_text
+                        record["corrected_text"] = corrected_text
+                        record["source_text_version"] = "corrected" if corrected_text != record.get("original_text", "") else "reviewed"
                 for record in page_quality:
                     if int(record["page_number"]) == selected_page_number:
                         record["reviewer_confirmed"] = True
                         record["reviewer_notes"] = notes
+                        record["disposition"] = disposition
+                        record["disposition_rationale"] = disposition_rationale
                         if record.get("status") == "Hard to Read" and corrected_text.strip():
                             record["status"] = "Needs Review"
+                for warning in warnings:
+                    if not warning.get("page_number") or int(warning.get("page_number")) == selected_page_number:
+                        warning["resolved"] = disposition not in {"Unresolved", "Needs escalation"}
                 save_page_text(workspace, memo_id, page_text)
                 save_page_quality(workspace, memo_id, page_quality)
+                save_extraction_warnings(workspace, memo_id, warnings)
                 rebuild_sections_from_page_text(workspace, memo_id, memo.get("extraction_method", "manual_correction"))
                 append_audit(workspace, memo_id, "page_quality_review_saved", {"page_number": selected_page_number})
                 st.success("Page review saved.")
@@ -297,7 +404,13 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
                 for record in page_quality:
                     if int(record["page_number"]) == selected_page_number:
                         record["reviewer_confirmed"] = True
+                        record["disposition"] = "Reviewed - acceptable"
+                        record["disposition_rationale"] = notes
+                for warning in warnings:
+                    if not warning.get("page_number") or int(warning.get("page_number")) == selected_page_number:
+                        warning["resolved"] = True
                 save_page_quality(workspace, memo_id, page_quality)
+                save_extraction_warnings(workspace, memo_id, warnings)
                 append_audit(workspace, memo_id, "page_quality_marked_reviewed", {"page_number": selected_page_number})
                 st.rerun()
 
@@ -340,6 +453,56 @@ def add_missing_required_sections(workspace: Path, memo_id: str) -> None:
         st.rerun()
 
 
+def _save_boundary_split(workspace: Path, memo_id: str, section_id: str, split_line: int) -> None:
+    sections = load_sections(workspace, memo_id)
+    updated: list[dict[str, Any]] = []
+    for section in sections:
+        if section.get("section_id") != section_id:
+            updated.append(section)
+            continue
+        lines = str(section.get("text", "")).splitlines()
+        if split_line <= 1 or split_line >= len(lines):
+            updated.append(section)
+            continue
+        first = {**section, "text": "\n".join(lines[: split_line - 1]), "line_end": int(section.get("line_start", 1)) + split_line - 2}
+        second = {
+            **section,
+            "section_id": f"section_{len(sections) + len(updated) + 1:03}",
+            "original_header": f"{section.get('original_header', 'Section')} - continued",
+            "text": "\n".join(lines[split_line - 1 :]),
+            "line_start": int(first["line_end"]) + 1,
+            "reviewer_confirmed": False,
+        }
+        updated.extend([first, second])
+    save_sections(workspace, memo_id, updated)
+    append_audit(workspace, memo_id, "section_split", {"section_id": section_id, "split_line": split_line})
+
+
+def _save_boundary_merge(workspace: Path, memo_id: str, section_id: str, direction: str) -> None:
+    sections = load_sections(workspace, memo_id)
+    index = next((idx for idx, section in enumerate(sections) if section.get("section_id") == section_id), -1)
+    merge_index = index - 1 if direction == "previous" else index + 1
+    if index < 0 or merge_index < 0 or merge_index >= len(sections):
+        return
+    keep_index = min(index, merge_index)
+    other_index = max(index, merge_index)
+    keep = sections[keep_index]
+    other = sections[other_index]
+    merged = {
+        **keep,
+        "text": f"{keep.get('text', '')}\n{other.get('text', '')}".strip(),
+        "page_start": min(int(keep.get("page_start", 1)), int(other.get("page_start", 1))),
+        "page_end": max(int(keep.get("page_end", 1)), int(other.get("page_end", 1))),
+        "line_start": min(int(keep.get("line_start", 1)), int(other.get("line_start", 1))),
+        "line_end": max(int(keep.get("line_end", 1)), int(other.get("line_end", 1))),
+        "reviewer_confirmed": False,
+    }
+    updated = [section for idx, section in enumerate(sections) if idx not in {keep_index, other_index}]
+    updated.insert(keep_index, merged)
+    save_sections(workspace, memo_id, updated)
+    append_audit(workspace, memo_id, "section_merged", {"section_id": section_id, "direction": direction})
+
+
 def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
     st.subheader("Confirm Sections")
     if not memo_id:
@@ -370,6 +533,26 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
         return
 
     add_missing_required_sections(workspace, memo_id)
+
+    st.markdown("##### Section Boundary Tools")
+    boundary_labels = {section["section_id"]: f"{section.get('canonical_section_name')} - {section.get('original_header')}" for section in sections}
+    boundary_section_id = st.selectbox("Section to split or merge", list(boundary_labels), format_func=lambda value: boundary_labels[value])
+    selected_boundary = next(section for section in sections if section["section_id"] == boundary_section_id)
+    max_split_line = max(2, len(str(selected_boundary.get("text", "")).splitlines()) - 1)
+    bcol1, bcol2, bcol3 = st.columns(3)
+    with bcol1:
+        split_line = st.number_input("Split before line", min_value=2, max_value=max_split_line, value=2, step=1)
+        if st.button("Split Section"):
+            _save_boundary_split(workspace, memo_id, boundary_section_id, int(split_line))
+            st.rerun()
+    with bcol2:
+        if st.button("Merge With Previous"):
+            _save_boundary_merge(workspace, memo_id, boundary_section_id, "previous")
+            st.rerun()
+    with bcol3:
+        if st.button("Merge With Next"):
+            _save_boundary_merge(workspace, memo_id, boundary_section_id, "next")
+            st.rerun()
 
     st.markdown("##### Review Detected Sections")
     saved_sections: list[dict[str, Any]] = []
@@ -430,6 +613,8 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
                 value=section.get("text", ""),
                 height=135,
                 key=f"confirm_text_{memo_id}_{section.get('section_id')}_{idx}",
+                disabled=True,
+                help="Text corrections happen in Review Text Quality. Use split/merge controls here to adjust section boundaries.",
             )
             st.markdown("</div>", unsafe_allow_html=True)
             saved_sections.append(
@@ -459,7 +644,7 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
             save_section_defs(workspace, updated_defs)
         save_sections(workspace, memo_id, saved_sections)
         if all(section.get("reviewer_confirmed") for section in saved_sections):
-            st.session_state["selected_step"] = "Tag Credit Review"
+            st.session_state["selected_step"] = "Set Up Facilities"
             st.rerun()
         st.success("Section review saved. Sections still needing review remain marked.")
 
@@ -493,6 +678,82 @@ def _render_tag_input(definition: TagDefinition, key: str):
     return st.text_input(label, key=key, help=help_text)
 
 
+def set_up_facilities_page(workspace: Path, memo_id: str | None) -> None:
+    st.subheader("Set Up Facilities")
+    if not memo_id:
+        blocked_step("Add a memo before setting up facilities.", "Add Memo")
+        return
+    statuses = step_summary(workspace, memo_id)
+    if statuses["Confirm Sections"] != "Complete":
+        blocked_step("Confirm sections before setting up facilities.", "Confirm Sections")
+        return
+
+    memo = load_memo_record(workspace, memo_id)
+    sections = load_sections(workspace, memo_id)
+    facilities = load_facilities(workspace, memo_id)
+    if not facilities:
+        facilities = _suggest_facilities(memo_id, str(memo.get("borrower_id", "")), sections)
+        save_facilities(workspace, memo_id, facilities)
+
+    st.caption("Confirm the credit facilities in this memo. Facility-specific tags and outcomes will attach to these records.")
+    rows = [
+        {
+            "_facility_id": facility.get("facility_id"),
+            "Facility Name": facility.get("facility_name"),
+            "Facility Type": facility.get("facility_type"),
+            "Amount": facility.get("amount", ""),
+            "Facility Closing Date": facility.get("closing_date", ""),
+            "Status": "Confirmed" if facility.get("reviewer_confirmed") else facility.get("status", "Proposed"),
+            "Why Suggested": facility.get("source_evidence", "")[:180],
+        }
+        for facility in facilities
+    ]
+    edited = st.data_editor(
+        pd.DataFrame(rows),
+        num_rows="dynamic",
+        width="stretch",
+        key=f"facility_editor_{memo_id}",
+        column_config={
+            "_facility_id": None,
+            "Facility Type": st.column_config.SelectboxColumn("Facility Type", options=DEFAULT_FACILITY_TYPES),
+            "Status": st.column_config.SelectboxColumn("Status", options=["Proposed", "Confirmed", "Rejected"]),
+            "Why Suggested": st.column_config.TextColumn("Why Suggested", disabled=True),
+        },
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Save Facilities", type="primary"):
+            saved = []
+            for row in edited.fillna("").to_dict("records"):
+                name = str(row.get("Facility Name") or "").strip()
+                if not name:
+                    continue
+                status = str(row.get("Status") or "Proposed")
+                if status not in {"Proposed", "Confirmed", "Rejected"}:
+                    status = "Proposed"
+                saved.append(
+                    FacilityRecord(
+                        facility_id=slugify(str(row.get("_facility_id") or f"facility_{name}")),
+                        memo_id=memo_id,
+                        borrower_id=str(memo.get("borrower_id", "")),
+                        facility_name=name,
+                        facility_type=str(row.get("Facility Type") or "Other"),
+                        amount=str(row.get("Amount") or ""),
+                        closing_date=str(row.get("Facility Closing Date") or ""),
+                        source_evidence=str(row.get("Why Suggested") or ""),
+                        reviewer_confirmed=status == "Confirmed",
+                        status=status,  # type: ignore[arg-type]
+                    ).model_dump()
+                )
+            save_facilities(workspace, memo_id, saved)
+            st.success("Facilities saved.")
+            st.rerun()
+    with col2:
+        confirmed = [facility for facility in facilities if facility.get("reviewer_confirmed") or facility.get("status") == "Confirmed"]
+        if confirmed and st.button("Continue to Tag Credit Review"):
+            go_to_step("Tag Credit Review")
+
+
 def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
     st.subheader("Tag Credit Review")
     if not memo_id:
@@ -500,14 +761,17 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
         return
 
     statuses = step_summary(workspace, memo_id)
-    if statuses["Confirm Sections"] != "Complete":
-        blocked_step("Confirm the memo sections before tagging the credit review.", "Confirm Sections")
+    if statuses["Set Up Facilities"] != "Complete":
+        blocked_step("Confirm facilities before tagging the credit review.", "Set Up Facilities")
         return
 
     memo = load_memo_record(workspace, memo_id)
     sections = load_sections(workspace, memo_id)
     tags = load_tags(workspace, memo_id)
     evidence = load_evidence(workspace, memo_id)
+    facilities = [facility for facility in load_facilities(workspace, memo_id) if facility.get("status") == "Confirmed" or facility.get("reviewer_confirmed")]
+    facility_options = ["", *[str(facility.get("facility_id")) for facility in facilities]]
+    facility_labels = {"": "Memo / no facility", **{str(facility.get("facility_id")): f"{facility.get('facility_name')} ({facility.get('facility_type')})" for facility in facilities}}
 
     section_labels = {
         section["section_id"]: f"{section.get('canonical_section_name')} - p.{section.get('page_start')}-{section.get('page_end')}"
@@ -568,6 +832,12 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
             key=f"citation_confidence_{memo_id}_{section_id}",
             help="Use High when the selected text directly supports the point. Use Low when it needs reviewer caution.",
         )
+        evidence_facilities = st.multiselect(
+            "Related facilities",
+            [str(facility.get("facility_id")) for facility in facilities],
+            format_func=lambda value: facility_labels.get(value, value),
+            key=f"evidence_facilities_{memo_id}_{section_id}",
+        )
         if st.button("Add Evidence", key=f"add_evidence_{memo_id}_{section_id}"):
             evidence_text = manual_evidence_text.strip() or selected_line_text.strip()
             if not evidence_text:
@@ -577,8 +847,13 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
                     evidence_id=f"ev_{uuid4().hex[:10]}",
                     memo_id=memo_id,
                     section_id=section_id,
+                    facility_ids=evidence_facilities,
                     page_number=int(section.get("page_start", 1)),
+                    line_start=(min(selected_line_indices) + int(section.get("line_start", 1))) if selected_line_indices else None,
+                    line_end=(max(selected_line_indices) + int(section.get("line_start", 1))) if selected_line_indices else None,
                     selected_text=evidence_text,
+                    corrected_text_used=True,
+                    source_text_version="corrected",
                     source_location=f"p.{section.get('page_start')} / {section.get('original_header')}",
                     evidence_role=slugify(evidence_role),
                     citation_confidence=citation_confidence,  # type: ignore[arg-type]
@@ -599,6 +874,8 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
     st.markdown("##### Credit Tags")
     with st.form(f"tag_form_{memo_id}_{section_id}"):
         values = {}
+        scopes = {}
+        facility_assignments = {}
         grouped: dict[str, list[TagDefinition]] = {}
         for definition in relevant_tags:
             grouped.setdefault(definition.category, []).append(definition)
@@ -609,6 +886,22 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
                 cols = st.columns(2)
                 for idx, definition in enumerate(grouped[category]):
                     with cols[idx % 2]:
+                        scopes[definition.tag_id] = st.selectbox(
+                            f"{definition.label} scope",
+                            definition.allowed_scopes or ["section"],
+                            index=(definition.allowed_scopes or ["section"]).index(definition.default_scope)
+                            if definition.default_scope in (definition.allowed_scopes or ["section"])
+                            else 0,
+                            key=f"scope_{memo_id}_{section_id}_{definition.tag_id}",
+                            help="Choose whether this tag applies to the memo, borrower, facility, section, or outcome.",
+                        )
+                        if definition.facility_required or "facility" in (definition.allowed_scopes or []):
+                            facility_assignments[definition.tag_id] = st.selectbox(
+                                f"{definition.label} facility",
+                                facility_options,
+                                format_func=lambda value: facility_labels.get(value, value),
+                                key=f"facility_{memo_id}_{section_id}_{definition.tag_id}",
+                            )
                         values[definition.tag_id] = _render_tag_input(definition, key=f"input_{memo_id}_{section_id}_{definition.tag_id}")
 
         confidence = st.selectbox(
@@ -631,11 +924,18 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
             if definition.evidence_required and value not in {"Not addressed in memo", "Not applicable"} and not selected_evidence:
                 st.error(f"{definition.label} requires evidence before it can be saved.")
                 return
+            facility_id = facility_assignments.get(definition.tag_id, "")
+            if definition.facility_required and not facility_id and value not in {"Not addressed in memo", "Not applicable"}:
+                st.error(f"{definition.label} requires a facility assignment.")
+                return
             new_records.append(
                 TagRecord(
                     tag_record_id=f"tag_{uuid4().hex[:10]}",
                     memo_id=memo_id,
                     section_id=section_id,
+                    scope=scopes.get(definition.tag_id, definition.default_scope),  # type: ignore[arg-type]
+                    facility_id=facility_id,
+                    borrower_id=str(memo.get("borrower_id", "")),
                     tag_id=definition.tag_id,
                     tag_label=definition.label,
                     value=value,
@@ -662,6 +962,96 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
         st.dataframe(pd.DataFrame(display_rows), width="stretch", hide_index=True)
 
 
+def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
+    st.subheader("Tag Outcomes")
+    if not memo_id:
+        blocked_step("Add a memo before tagging outcomes.", "Add Memo")
+        return
+    statuses = step_summary(workspace, memo_id)
+    if statuses["Set Up Facilities"] != "Complete":
+        blocked_step("Set up facilities before tagging outcomes.", "Set Up Facilities")
+        return
+
+    memo = load_memo_record(workspace, memo_id)
+    facilities = [facility for facility in load_facilities(workspace, memo_id) if facility.get("status") == "Confirmed" or facility.get("reviewer_confirmed")]
+    outcomes = load_outcomes(workspace, memo_id)
+    outcome_by_facility = {outcome.get("facility_id", ""): outcome for outcome in outcomes}
+    labels = [item["label"] for item in DEFAULT_OUTCOME_TAXONOMY]
+    severity_lookup = {item["label"]: int(item["severity_rank"]) for item in DEFAULT_OUTCOME_TAXONOMY}
+    windows = ["Unknown", "0-6 months", "6-12 months", "12-24 months", "24-36 months", "Life-to-date"]
+
+    st.caption("Outcome tagging is part of the dataset. If the deal is new or not seasoned, mark the outcome as unknown.")
+    saved: list[dict[str, Any]] = []
+    facility_closing_dates: dict[str, str] = {}
+    with st.form(f"outcomes_{memo_id}"):
+        for facility in facilities:
+            facility_id = str(facility.get("facility_id"))
+            existing = outcome_by_facility.get(facility_id, {})
+            st.markdown(f"##### {facility.get('facility_name')} ({facility.get('facility_type')})")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                outcome_label = st.selectbox(
+                    "Outcome",
+                    labels,
+                    index=labels.index(existing.get("outcome_label")) if existing.get("outcome_label") in labels else 0,
+                    key=f"outcome_label_{memo_id}_{facility_id}",
+                )
+                event_date = st.text_input("Outcome event date", value=existing.get("event_date", ""), key=f"outcome_date_{memo_id}_{facility_id}")
+            with col2:
+                closing_date = st.text_input("Facility closing date", value=facility.get("closing_date", ""), key=f"closing_date_{memo_id}_{facility_id}")
+                facility_closing_dates[facility_id] = closing_date
+                outcome_window = st.selectbox(
+                    "Outcome window from closing",
+                    windows,
+                    index=windows.index(existing.get("outcome_window")) if existing.get("outcome_window") in windows else 0,
+                    key=f"outcome_window_{memo_id}_{facility_id}",
+                )
+            with col3:
+                knew = st.selectbox(
+                    "Reviewer knew outcome",
+                    ["Yes", "No", "Unclear"],
+                    index=["Yes", "No", "Unclear"].index(existing.get("reviewer_knew_outcome", "Unclear")),
+                    key=f"knew_outcome_{memo_id}_{facility_id}",
+                )
+                foreseeability = st.selectbox(
+                    "Foreseeability",
+                    ["Visible in memo", "Partially visible", "Hindsight-only", "Not assessed", "N/A"],
+                    index=["Visible in memo", "Partially visible", "Hindsight-only", "Not assessed", "N/A"].index(existing.get("foreseeability", "Not assessed")),
+                    key=f"foreseeability_{memo_id}_{facility_id}",
+                )
+            rationale = st.text_area("Outcome rationale", value=existing.get("rationale", ""), key=f"outcome_rationale_{memo_id}_{facility_id}", height=80)
+            saved.append(
+                OutcomeRecord(
+                    outcome_id=str(existing.get("outcome_id") or f"outcome_{facility_id}"),
+                    memo_id=memo_id,
+                    borrower_id=str(memo.get("borrower_id", "")),
+                    facility_id=facility_id,
+                    outcome_label=outcome_label,
+                    severity_rank=severity_lookup.get(outcome_label, 0),
+                    event_date=event_date,
+                    date_basis="facility_closing_date",
+                    outcome_window=outcome_window,
+                    reviewer_knew_outcome=knew,  # type: ignore[arg-type]
+                    foreseeability=foreseeability,  # type: ignore[arg-type]
+                    rationale=rationale,
+                ).model_dump()
+            )
+        submitted = st.form_submit_button("Save Outcomes", type="primary")
+    if submitted:
+        updated_facilities = []
+        for facility in load_facilities(workspace, memo_id):
+            facility_id = str(facility.get("facility_id", ""))
+            if facility_id in facility_closing_dates:
+                facility["closing_date"] = facility_closing_dates[facility_id]
+                facility["updated_at"] = utc_now()
+            updated_facilities.append(facility)
+        save_facilities(workspace, memo_id, updated_facilities)
+        save_outcomes(workspace, memo_id, saved)
+        st.success("Outcome tags saved.")
+        st.session_state["selected_step"] = "Quality Check"
+        st.rerun()
+
+
 def quality_check_page(workspace: Path, memo_id: str | None) -> None:
     st.subheader("Quality Check")
     if not memo_id:
@@ -677,8 +1067,8 @@ def quality_check_page(workspace: Path, memo_id: str | None) -> None:
         [
             ("Pages Checked", f"{metrics['pages_checked']} / {metrics['pages_total']}"),
             ("Sections Confirmed", f"{metrics['sections_confirmed']} / {metrics['sections_total']}"),
-            ("Saved Tags", metrics["tags_total"]),
-            ("Evidence Items", metrics["evidence_total"]),
+            ("Facilities", f"{metrics['facilities_confirmed']} / {metrics['facilities_total']}"),
+            ("Outcomes", metrics["outcomes_total"]),
             ("Review Status", STATUS_LABELS.get(review.get("status", "Draft"), review.get("status", "Draft"))),
         ],
         strict=True,
@@ -703,6 +1093,8 @@ def quality_check_page(workspace: Path, memo_id: str | None) -> None:
     with st.form(f"approve_{memo_id}"):
         reviewer = st.text_input("Reviewer", value=review.get("reviewer", load_memo_record(workspace, memo_id).get("reviewer", "")))
         adjudicator = st.text_input("Approver", value=review.get("adjudicator", ""))
+        if reviewer and adjudicator and reviewer == adjudicator:
+            st.warning("You are approving your own review. This is allowed, and the approval will be audited.")
         notes = st.text_area("Approval notes", value=review.get("adjudication_notes", ""), height=110)
         approved = st.form_submit_button(
             "Approve for Training Dataset",
@@ -710,14 +1102,29 @@ def quality_check_page(workspace: Path, memo_id: str | None) -> None:
             help="Approve only when required sections, tags, and evidence are complete enough to be used as training data.",
         )
     if approved:
+        memo = load_memo_record(workspace, memo_id)
+        schema_hash = active_schema_hash(workspace)
+        memo.update({"schema_version": SCHEMA_VERSION, "schema_hash": schema_hash})
+        save_memo_record(workspace, memo_id, memo)
+        write_json(
+            memo_dir(workspace, memo_id) / "schema" / "schema_snapshot.json",
+            {
+                **active_schema_payload(workspace),
+                "schema_hash": schema_hash,
+                "created_at": utc_now(),
+            },
+        )
         review.update(
             {
                 "memo_id": memo_id,
                 "status": "Approved Gold",
+                "assignment_status": "Approved for Training Dataset",
                 "reviewer": reviewer,
                 "adjudicator": adjudicator,
                 "adjudication_notes": notes,
                 "approved_at": utc_now(),
+                "schema_version": SCHEMA_VERSION,
+                "schema_hash": schema_hash,
             }
         )
         save_review(workspace, memo_id, review)
@@ -762,10 +1169,14 @@ def download_results_page(workspace: Path, memo_id: str | None) -> None:
             help="Create the structured training files from approved memo records.",
         ):
             paths = export_jsonl(workspace, include_only_approved=True)
+            prepared["span_training"] = str(paths["spans"])
             prepared["section_training"] = str(paths["sections"])
             prepared["memo_training"] = str(paths["memos"])
+        span_training_path = Path(prepared["span_training"]) if prepared.get("span_training") else None
         section_training_path = Path(prepared["section_training"]) if prepared.get("section_training") else None
         memo_training_path = Path(prepared["memo_training"]) if prepared.get("memo_training") else None
+        if span_training_path and span_training_path.exists():
+            st.download_button("Download Evidence Training File", data=span_training_path.read_bytes(), file_name=span_training_path.name)
         if section_training_path and section_training_path.exists():
             st.download_button("Download Section Training File", data=section_training_path.read_bytes(), file_name=section_training_path.name)
         if memo_training_path and memo_training_path.exists():

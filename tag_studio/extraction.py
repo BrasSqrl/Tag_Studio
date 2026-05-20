@@ -22,6 +22,12 @@ def tesseract_available() -> bool:
     return shutil.which("tesseract") is not None
 
 
+def pdf_page_count(pdf_path: Path) -> int:
+    fitz = _require_fitz()
+    with fitz.open(pdf_path) as doc:
+        return len(doc)
+
+
 def render_pdf_pages(pdf_path: Path, pages_dir: Path, zoom: float = 1.6) -> list[Path]:
     fitz = _require_fitz()
     pages_dir.mkdir(parents=True, exist_ok=True)
@@ -92,10 +98,14 @@ def ocr_images(image_paths: list[Path]) -> list[PageText]:
 
     pages: list[PageText] = []
     for index, image_path in enumerate(image_paths, start=1):
+        try:
+            page_number = int(image_path.stem.split("_")[-1])
+        except ValueError:
+            page_number = index
         ocr_path = preprocess_image_for_ocr(image_path)
         with Image.open(ocr_path) as image:
             text = pytesseract.image_to_string(image).strip()
-        pages.append(PageText(page_number=index, text=text, extraction_method="local_ocr"))
+        pages.append(PageText(page_number=page_number, text=text, extraction_method="local_ocr"))
     return pages
 
 
@@ -103,18 +113,32 @@ def extract_pdf(pdf_path: Path, pages_dir: Path, force_ocr: bool = False) -> tup
     rendered = render_pdf_pages(pdf_path, pages_dir)
     warning: str | None = None
 
-    if not force_ocr:
-        embedded_pages = extract_embedded_text(pdf_path)
-        avg_chars = sum(len(page.text) for page in embedded_pages) / max(len(embedded_pages), 1)
-        if avg_chars >= MIN_TEXT_CHARS_PER_PAGE:
-            return embedded_pages, rendered, "local_pdf_text", warning
+    embedded_pages = extract_embedded_text(pdf_path)
+    if force_ocr:
+        pages_to_ocr = set(range(1, len(rendered) + 1))
+    else:
+        pages_to_ocr = {
+            page.page_number
+            for page in embedded_pages
+            if len(page.text.strip()) < MIN_TEXT_CHARS_PER_PAGE
+        }
+    if not pages_to_ocr:
+        return embedded_pages, rendered, "local_pdf_text", warning
 
+    page_lookup = {page.page_number: page for page in embedded_pages}
     try:
-        ocr_pages = ocr_images(rendered)
-        return ocr_pages, rendered, "local_ocr", warning
+        ocr_rendered = [path for path in rendered if int(path.stem.split("_")[-1]) in pages_to_ocr]
+        ocr_lookup = {page.page_number: page for page in ocr_images(ocr_rendered)}
+        mixed_pages: list[PageText] = []
+        for page_number in range(1, len(rendered) + 1):
+            if page_number in pages_to_ocr:
+                mixed_pages.append(ocr_lookup.get(page_number) or page_lookup.get(page_number) or PageText(page_number=page_number, text="", extraction_method="manual_correction"))
+            else:
+                mixed_pages.append(page_lookup[page_number])
+        method = "local_ocr" if len(pages_to_ocr) == len(rendered) else "local_pdf_text"
+        return mixed_pages, rendered, method, warning
     except RuntimeError as exc:
-        fallback_pages = extract_embedded_text(pdf_path)
         warning = str(exc)
-        if not any(page.text for page in fallback_pages):
-            warning += " No embedded text was found; use manual correction or configure local OCR support."
-        return fallback_pages, rendered, "manual_correction", warning
+        if pages_to_ocr:
+            warning += f" {len(pages_to_ocr)} page(s) had little embedded text and need review or manual correction."
+        return embedded_pages, rendered, "manual_correction", warning
