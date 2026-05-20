@@ -51,7 +51,7 @@ TAG_COLUMNS = [
     "help_text",
 ]
 
-OUTCOME_COLUMNS = ["label", "severity_rank"]
+OUTCOME_COLUMNS = ["event_type", "severity_rank"]
 SCORING_COLUMNS = [
     "score_name",
     "component_tag_id",
@@ -270,7 +270,7 @@ def create_tag_setup_workbook(
     outcome_ws = wb.create_sheet(OUTCOME_SHEET)
     outcome_ws.append(OUTCOME_COLUMNS)
     for outcome in outcomes or []:
-        outcome_ws.append([outcome.get("label", ""), outcome.get("severity_rank", 0)])
+        outcome_ws.append([outcome.get("event_type", outcome.get("label", "")), outcome.get("severity_rank", 0)])
     _style_sheet(outcome_ws, OUTCOME_COLUMNS)
 
     scoring_ws = wb.create_sheet(SCORING_SHEET)
@@ -417,9 +417,9 @@ def _parse_outcomes(wb) -> list[dict[str, Any]] | None:
     rows = _worksheet_rows(wb, OUTCOME_SHEET, OUTCOME_COLUMNS)
     outcomes = []
     for row in rows:
-        if not row.get("label"):
+        if not row.get("event_type"):
             continue
-        outcomes.append({"label": str(row.get("label")).strip(), "severity_rank": _parse_int(row.get("severity_rank"), "severity_rank", int(row["_row_number"]), 0)})
+        outcomes.append({"event_type": str(row.get("event_type")).strip(), "severity_rank": _parse_int(row.get("severity_rank"), "severity_rank", int(row["_row_number"]), 0)})
     return outcomes
 
 

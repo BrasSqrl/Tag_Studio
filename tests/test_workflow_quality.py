@@ -14,7 +14,7 @@ def test_quality_findings_flags_unreviewed_pages_and_missing_tags(tmp_path) -> N
         memo_id="memo_quality_001",
         memo_type="Renewal",
         facility_type="Revolver",
-        borrower_name_or_hash="SYNTHETIC",
+        customer_id="1001",
         reviewer="tester",
     )
     save_sections(
@@ -71,7 +71,7 @@ def test_memo_lock_blocks_other_active_session(tmp_path) -> None:
         memo_id="memo_lock_001",
         memo_type="Renewal",
         facility_type="Revolver",
-        borrower_name_or_hash="SYNTHETIC",
+        customer_id="1001",
         reviewer="tester",
     )
 

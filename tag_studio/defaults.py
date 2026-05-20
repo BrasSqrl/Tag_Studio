@@ -27,19 +27,39 @@ DEFAULT_FACILITY_TYPES = [
     "Other",
 ]
 
-DEFAULT_OUTCOME_TAXONOMY = [
-    {"label": "Unknown / Not seasoned yet", "severity_rank": 0},
-    {"label": "No adverse outcome / performing", "severity_rank": 1},
-    {"label": "Covenant breach", "severity_rank": 3},
-    {"label": "Payment delinquency", "severity_rank": 4},
-    {"label": "Risk rating downgrade", "severity_rank": 4},
-    {"label": "Watchlist / criticized / classified", "severity_rank": 5},
-    {"label": "Forbearance or amendment due to stress", "severity_rank": 6},
-    {"label": "Workout / restructuring", "severity_rank": 7},
-    {"label": "Nonaccrual", "severity_rank": 8},
-    {"label": "Default", "severity_rank": 9},
-    {"label": "Charge-off / realized loss", "severity_rank": 10},
-    {"label": "Bankruptcy / liquidation", "severity_rank": 10},
+DEFAULT_OUTCOME_AVAILABILITY_STATES = [
+    "Known Outcome",
+    "Not Seasoned Yet",
+    "Outcome Data Unavailable",
+    "Outcome Not Checked",
+    "No Adverse Outcome Observed",
+]
+
+DEFAULT_OUTCOME_EVENT_TYPES = [
+    {"event_type": "Covenant breach", "severity_rank": 3},
+    {"event_type": "Payment delinquency", "severity_rank": 4},
+    {"event_type": "Risk rating downgrade", "severity_rank": 4},
+    {"event_type": "Watchlist / criticized / classified", "severity_rank": 5},
+    {"event_type": "Forbearance or amendment due to stress", "severity_rank": 6},
+    {"event_type": "Workout / restructuring", "severity_rank": 7},
+    {"event_type": "Nonaccrual", "severity_rank": 8},
+    {"event_type": "Default", "severity_rank": 9},
+    {"event_type": "Charge-off / realized loss", "severity_rank": 10},
+    {"event_type": "Bankruptcy / liquidation", "severity_rank": 10},
+]
+
+DEFAULT_OUTCOME_TAXONOMY = DEFAULT_OUTCOME_EVENT_TYPES
+
+DEFAULT_OUTCOME_SOURCE_TYPES = [
+    "Servicing system",
+    "Risk rating system",
+    "Watchlist / criticized report",
+    "Workout system",
+    "Covenant tracking system",
+    "Credit file",
+    "Loan review report",
+    "Reviewer attestation",
+    "Other",
 ]
 
 DEFAULT_SCORING_RUBRIC = [
@@ -540,14 +560,14 @@ DEFAULT_TAGS = [
         help_text="0-100 advisory score.",
     ),
     TagDefinition(
-        tag_id="outcome_label",
-        label="Outcome label",
+        tag_id="outcome_availability_state",
+        label="Outcome availability state",
         category="Outcome",
         data_type="enum",
-        allowed_values=["Performing", "Covenant breach", "Past due", "Criticized", "Non-accrual", "Default", "Charge-off", "Refinanced out", "Unknown"],
+        allowed_values=DEFAULT_OUTCOME_AVAILABILITY_STATES,
         allowed_scopes=["outcome", "facility"],
         default_scope="outcome",
         export_use="memo",
-        help_text="Use only when outcome data is available and review boundary is clear.",
+        help_text="Use the dedicated outcome screen to distinguish known outcomes, unseasoned deals, unavailable data, and no adverse outcome observed.",
     ),
 ]

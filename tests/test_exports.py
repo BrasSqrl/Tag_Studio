@@ -26,7 +26,7 @@ def test_jsonl_export_preserves_instruction_context_response_shape(tmp_path) -> 
         memo_id="memo_export_001",
         memo_type="Renewal",
         facility_type="Revolver",
-        borrower_name_or_hash="SYNTHETIC",
+        customer_id="1001",
         reviewer="tester",
     )
     section = {
@@ -91,7 +91,7 @@ def test_jsonl_export_preserves_instruction_context_response_shape(tmp_path) -> 
 
     paths = export_jsonl(workspace, include_only_approved=True)
 
-    assert {"spans", "sections", "memos", "audit"} == set(paths)
+    assert {"spans", "sections", "memos", "outcomes", "audit", "manifest"} == set(paths)
     for path in paths.values():
         assert path.exists()
         for line in path.read_text(encoding="utf-8").splitlines():
@@ -101,3 +101,9 @@ def test_jsonl_export_preserves_instruction_context_response_shape(tmp_path) -> 
                 assert isinstance(record["instruction"], str)
                 assert isinstance(record["context"], str)
                 json.loads(record["response"])
+    for label in ["spans", "sections", "memos", "outcomes"]:
+        exported_text = paths[label].read_text(encoding="utf-8")
+        assert memo.memo_id not in exported_text
+        assert "1001" not in exported_text
+        assert "source_hash" not in exported_text
+        assert "source_document_hash" not in exported_text

@@ -59,7 +59,7 @@ def main() -> None:
         memo_id="memo_test_001",
         memo_type="Renewal",
         facility_type="Revolver",
-        borrower_name_or_hash="TEST_BORROWER",
+        customer_id="1001",
         reviewer="tester",
     )
 

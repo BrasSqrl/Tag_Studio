@@ -388,7 +388,7 @@ def create_memo_workspace(
     memo_id: str,
     memo_type: str,
     facility_type: str,
-    borrower_name_or_hash: str,
+    customer_id: str,
     reviewer: str,
 ) -> MemoRecord:
     base = memo_dir(workspace, memo_id)
@@ -423,8 +423,7 @@ def create_memo_workspace(
         source_hash=source_hash,
         memo_type=memo_type,
         facility_type=facility_type,
-        borrower_name_or_hash=borrower_name_or_hash,
-        borrower_id=slugify(borrower_name_or_hash) if borrower_name_or_hash else "",
+        customer_id=customer_id,
         reviewer=reviewer,
         schema_version=SCHEMA_VERSION,
         schema_hash=active_schema_hash(workspace),
@@ -450,7 +449,9 @@ def create_memo_workspace(
         ).model_dump(),
     )
     write_json(base / "facilities" / "facility_records.json", [])
-    write_json(base / "outcomes" / "outcome_records.json", [])
+    write_json(base / "outcomes" / "facility_outcome_summaries.json", [])
+    write_json(base / "outcomes" / "outcome_events.json", [])
+    write_json(base / "outcomes" / "foreseeability_assessments.json", [])
     write_json(base / "tables" / "table_metric_records.json", [])
     append_audit(workspace, memo_id, "memo_created", {"source_file_name": file_name})
     _update_memo_index(workspace, memo_id)
@@ -529,13 +530,31 @@ def save_facilities(workspace: Path, memo_id: str, facilities: list[dict[str, An
     append_audit(workspace, memo_id, "facilities_saved", {"facility_count": len(facilities)})
 
 
-def load_outcomes(workspace: Path, memo_id: str) -> list[dict[str, Any]]:
-    return read_json(memo_dir(workspace, memo_id) / "outcomes" / "outcome_records.json", [])
+def load_outcome_summaries(workspace: Path, memo_id: str) -> list[dict[str, Any]]:
+    return read_json(memo_dir(workspace, memo_id) / "outcomes" / "facility_outcome_summaries.json", [])
 
 
-def save_outcomes(workspace: Path, memo_id: str, outcomes: list[dict[str, Any]]) -> None:
-    write_json(memo_dir(workspace, memo_id) / "outcomes" / "outcome_records.json", outcomes)
-    append_audit(workspace, memo_id, "outcomes_saved", {"outcome_count": len(outcomes)})
+def save_outcome_summaries(workspace: Path, memo_id: str, summaries: list[dict[str, Any]]) -> None:
+    write_json(memo_dir(workspace, memo_id) / "outcomes" / "facility_outcome_summaries.json", summaries)
+    append_audit(workspace, memo_id, "outcome_summaries_saved", {"summary_count": len(summaries)})
+
+
+def load_outcome_events(workspace: Path, memo_id: str) -> list[dict[str, Any]]:
+    return read_json(memo_dir(workspace, memo_id) / "outcomes" / "outcome_events.json", [])
+
+
+def save_outcome_events(workspace: Path, memo_id: str, events: list[dict[str, Any]]) -> None:
+    write_json(memo_dir(workspace, memo_id) / "outcomes" / "outcome_events.json", events)
+    append_audit(workspace, memo_id, "outcome_events_saved", {"event_count": len(events)})
+
+
+def load_foreseeability_assessments(workspace: Path, memo_id: str) -> list[dict[str, Any]]:
+    return read_json(memo_dir(workspace, memo_id) / "outcomes" / "foreseeability_assessments.json", [])
+
+
+def save_foreseeability_assessments(workspace: Path, memo_id: str, assessments: list[dict[str, Any]]) -> None:
+    write_json(memo_dir(workspace, memo_id) / "outcomes" / "foreseeability_assessments.json", assessments)
+    append_audit(workspace, memo_id, "foreseeability_assessments_saved", {"assessment_count": len(assessments)})
 
 
 def load_table_metrics(workspace: Path, memo_id: str) -> list[dict[str, Any]]:

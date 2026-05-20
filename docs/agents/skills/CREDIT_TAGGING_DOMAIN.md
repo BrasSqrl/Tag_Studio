@@ -12,14 +12,14 @@ Tag Studio exists to distill underwriting signal from credit memos into reviewed
 - Risk findings need supporting evidence.
 - Mitigants should be linked to the risks they address.
 - Structure enhancements should improve monitoring, collateral protection, covenant discipline, or repayment support.
-- Outcome labels, when used, must remain distinct from as-of memo review.
+- Outcome tags, when used, must remain distinct from as-of memo review. Prefer precise terms such as Outcome Availability State and Outcome Event Type.
 
 ## Required Language Boundaries
 
 - Say assist, review, support, flag, recommend, or prepare.
 - Do not say the app can approve or decline credit, assign an official rating, make a final decision, or act autonomously.
 - Keep human final decisioning clear.
-- Keep outcome-aware labels distinct from as-of memo review.
+- Keep outcome-aware training labels distinct from as-of memo review.
 
 ## Review Questions
 

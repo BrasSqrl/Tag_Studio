@@ -25,6 +25,26 @@ PageDisposition = Literal[
 ]
 LayoutBlockType = Literal["heading", "paragraph", "table", "handwritten_note", "footer", "signature", "unknown"]
 TagScope = Literal["memo", "borrower", "facility", "section", "outcome"]
+EvidenceType = Literal["memo_evidence", "outcome_source_evidence"]
+OutcomeAvailabilityState = Literal[
+    "Known Outcome",
+    "Not Seasoned Yet",
+    "Outcome Data Unavailable",
+    "Outcome Not Checked",
+    "No Adverse Outcome Observed",
+]
+OutcomeSourceType = Literal[
+    "Servicing system",
+    "Risk rating system",
+    "Watchlist / criticized report",
+    "Workout system",
+    "Covenant tracking system",
+    "Credit file",
+    "Loan review report",
+    "Reviewer attestation",
+    "Other",
+]
+ForeseeabilityValue = Literal["Visible in memo", "Partially visible", "Hindsight-only", "Not assessed", "N/A"]
 
 
 def utc_now() -> str:
@@ -69,8 +89,7 @@ class MemoRecord(BaseModel):
     source_hash: str
     memo_type: str = "Renewal"
     facility_type: str = "Multiple"
-    borrower_name_or_hash: str = ""
-    borrower_id: str = ""
+    customer_id: str = ""
     reviewer: str = ""
     extraction_method: ExtractionMethod = "local_pdf_text"
     schema_version: str = ""
@@ -158,8 +177,11 @@ class EvidenceRecord(BaseModel):
     evidence_id: str
     memo_id: str
     section_id: str
+    evidence_type: EvidenceType = "memo_evidence"
     tag_record_ids: list[str] = Field(default_factory=list)
     facility_ids: list[str] = Field(default_factory=list)
+    outcome_event_ids: list[str] = Field(default_factory=list)
+    foreseeability_ids: list[str] = Field(default_factory=list)
     page_number: int | None = None
     line_start: int | None = None
     line_end: int | None = None
@@ -170,7 +192,12 @@ class EvidenceRecord(BaseModel):
     source_location: str = ""
     evidence_role: str = "supporting_fact"
     citation_confidence: Literal["High", "Medium", "Low"] = "Medium"
-    source_document_hash: str
+    source_document_hash: str = ""
+    source_type: OutcomeSourceType | None = None
+    source_checked_date: str = ""
+    source_confidence: Literal["High", "Medium", "Low"] = "Medium"
+    source_note: str = ""
+    source_document_reference: str = ""
     created_at: str = Field(default_factory=utc_now)
 
 
@@ -180,7 +207,7 @@ class TagRecord(BaseModel):
     section_id: str
     scope: TagScope = "section"
     facility_id: str = ""
-    borrower_id: str = ""
+    customer_id: str = ""
     outcome_id: str = ""
     tag_id: str
     tag_label: str
@@ -229,7 +256,7 @@ class MemoLockRecord(BaseModel):
 class FacilityRecord(BaseModel):
     facility_id: str
     memo_id: str
-    borrower_id: str = ""
+    customer_id: str = ""
     facility_name: str
     facility_type: str
     amount: str = ""
@@ -244,20 +271,50 @@ class FacilityRecord(BaseModel):
     updated_at: str = Field(default_factory=utc_now)
 
 
-class OutcomeRecord(BaseModel):
-    outcome_id: str
+class FacilityOutcomeSummaryRecord(BaseModel):
+    outcome_summary_id: str
     memo_id: str
-    borrower_id: str = ""
+    customer_id: str = ""
     facility_id: str = ""
-    outcome_label: str = "Unknown / Not seasoned yet"
-    severity_rank: int = 0
-    event_date: str = ""
-    date_basis: Literal["facility_closing_date", "memo_approval_date", "first_funding_date", "unknown"] = "facility_closing_date"
-    outcome_window: str = "Unknown"
-    source_system: str = ""
+    outcome_availability_state: OutcomeAvailabilityState = "Outcome Not Checked"
+    seasoning_months: int = 12
+    primary_adverse_outcome: str = ""
+    primary_outcome_event_id: str = ""
+    primary_event_date: str = ""
+    primary_severity_rank: int = 0
+    no_adverse_outcome_observed_date: str = ""
+    source_type: OutcomeSourceType | None = None
+    source_checked_date: str = ""
     source_confidence: Literal["High", "Medium", "Low"] = "Medium"
-    reviewer_knew_outcome: Literal["Yes", "No", "Unclear"] = "Unclear"
-    foreseeability: Literal["Visible in memo", "Partially visible", "Hindsight-only", "Not assessed", "N/A"] = "Not assessed"
+    source_note: str = ""
+    approval_ready: bool = False
+    created_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+
+
+class OutcomeEventRecord(BaseModel):
+    outcome_event_id: str
+    memo_id: str
+    facility_id: str = ""
+    event_type: str
+    event_date: str = ""
+    severity_rank: int = 0
+    source_type: OutcomeSourceType | None = None
+    source_checked_date: str = ""
+    source_confidence: Literal["High", "Medium", "Low"] = "Medium"
+    source_note: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=utc_now)
+    updated_at: str = Field(default_factory=utc_now)
+
+
+class ForeseeabilityAssessmentRecord(BaseModel):
+    foreseeability_id: str
+    memo_id: str
+    facility_id: str = ""
+    outcome_event_id: str = ""
+    foreseeability: ForeseeabilityValue = "Not assessed"
+    memo_evidence_ids: list[str] = Field(default_factory=list)
     rationale: str = ""
     created_at: str = Field(default_factory=utc_now)
     updated_at: str = Field(default_factory=utc_now)

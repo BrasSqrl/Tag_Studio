@@ -41,7 +41,7 @@ def schema_page(workspace: Path) -> None:
         st.warning(warning)
 
     st.markdown("##### Excel Template Update")
-    st.caption("Download the current setup, edit it in Excel, then upload it back to update sections, tags, outcome labels, and scoring rules in bulk.")
+    st.caption("Download the current setup, edit it in Excel, then upload it back to update sections, tags, outcome event types, and scoring rules in bulk.")
     template_state_key = "tag_setup_template_bytes"
     if st.button(
         "Prepare Tag Setup Template",
@@ -68,7 +68,7 @@ def schema_page(workspace: Path) -> None:
     with update_col2:
         update_tags = st.checkbox("Update Credit Tags", value=True)
     with update_col3:
-        update_outcomes = st.checkbox("Update Outcome Labels", value=True)
+        update_outcomes = st.checkbox("Update Outcome Event Types", value=True)
     with update_col4:
         update_scoring = st.checkbox("Update Scoring Rules", value=True)
     with update_col5:
@@ -111,14 +111,16 @@ def schema_page(workspace: Path) -> None:
                 st.session_state.pop(template_state_key, None)
                 st.session_state["tag_setup_import_message"] = (
                     f"Tag setup updated. Sections: {len(section_defs)}. Credit tags: {len(tag_defs)}. "
-                    f"Outcome labels: {len(outcome_taxonomy)}. Scoring rules: {len(scoring_rubric)}."
+                    f"Outcome event types: {len(outcome_taxonomy)}. Scoring rules: {len(scoring_rubric)}."
                 )
                 st.session_state["tag_setup_import_warnings"] = [*imported.warnings, *import_warnings]
                 st.rerun()
             except Exception as exc:  # noqa: BLE001 - convert workbook errors to admin-facing guidance.
                 st.error(f"Tag setup workbook could not be applied: {exc}")
 
-    tab_sections, tab_tags, tab_outcomes, tab_scoring = st.tabs(["Standard Memo Sections", "Credit Tags", "Outcome Labels", "Scoring Rules"])
+    tab_sections, tab_tags, tab_outcomes, tab_scoring = st.tabs(
+        ["Standard Memo Sections", "Credit Tags", "Outcome Event Types", "Scoring Rules"]
+    )
     with tab_sections:
         rows = [
             {
@@ -213,15 +215,15 @@ def schema_page(workspace: Path) -> None:
 
     with tab_outcomes:
         edited = st.data_editor(pd.DataFrame(outcome_taxonomy), num_rows="dynamic", width="stretch", key="outcome_taxonomy_editor")
-        if st.button("Save Outcome Labels", type="primary"):
+        if st.button("Save Outcome Event Types", type="primary"):
             records = []
             for row in edited.fillna("").to_dict("records"):
-                label = str(row.get("label") or "").strip()
-                if not label:
+                event_type = str(row.get("event_type") or row.get("label") or "").strip()
+                if not event_type:
                     continue
-                records.append({"label": label, "severity_rank": int(row.get("severity_rank") or 0)})
+                records.append({"event_type": event_type, "severity_rank": int(row.get("severity_rank") or 0)})
             save_outcome_taxonomy(workspace, records)
-            st.success("Outcome labels saved.")
+            st.success("Outcome event types saved.")
 
     with tab_scoring:
         edited = st.data_editor(pd.DataFrame(scoring_rubric), num_rows="dynamic", width="stretch", key="scoring_rubric_editor")

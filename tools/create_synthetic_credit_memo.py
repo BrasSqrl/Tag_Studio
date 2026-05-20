@@ -5,7 +5,6 @@ from pathlib import Path
 
 import fitz  # type: ignore
 
-
 OUTPUT_PATH = Path("test_fixtures/synthetic_middle_market_credit_memo.pdf")
 
 

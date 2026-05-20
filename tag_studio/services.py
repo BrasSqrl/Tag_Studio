@@ -7,7 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from .app_config import STATUS_LABELS
-from .defaults import SCHEMA_VERSION
+from .defaults import DEFAULT_OUTCOME_EVENT_TYPES, SCHEMA_VERSION
 from .document_intelligence import load_extraction_warnings, load_page_quality, load_page_text
 from .models import MemoLockRecord, SectionDefinition, TagDefinition
 from .sectioning import propose_section_candidates, propose_sections, required_section_gaps
@@ -18,8 +18,10 @@ from .storage import (
     load_active_lock,
     load_evidence,
     load_facilities,
+    load_foreseeability_assessments,
     load_memo_record,
-    load_outcomes,
+    load_outcome_events,
+    load_outcome_summaries,
     load_review,
     load_scoring_rubric,
     load_sections,
@@ -43,7 +45,9 @@ class MemoBundle:
     tags: list[dict[str, Any]]
     evidence: list[dict[str, Any]]
     facilities: list[dict[str, Any]]
-    outcomes: list[dict[str, Any]]
+    outcome_summaries: list[dict[str, Any]]
+    outcome_events: list[dict[str, Any]]
+    foreseeability_assessments: list[dict[str, Any]]
     table_metrics: list[dict[str, Any]]
     page_quality: list[dict[str, Any]]
     page_text: list[dict[str, Any]]
@@ -122,7 +126,9 @@ def load_memo_bundle(workspace: Path, memo_id: str) -> MemoBundle:
         tags=load_tags(workspace, memo_id),
         evidence=load_evidence(workspace, memo_id),
         facilities=load_facilities(workspace, memo_id),
-        outcomes=load_outcomes(workspace, memo_id),
+        outcome_summaries=load_outcome_summaries(workspace, memo_id),
+        outcome_events=load_outcome_events(workspace, memo_id),
+        foreseeability_assessments=load_foreseeability_assessments(workspace, memo_id),
         table_metrics=load_table_metrics(workspace, memo_id),
         page_quality=load_page_quality(workspace, memo_id),
         page_text=load_page_text(workspace, memo_id),
@@ -137,9 +143,9 @@ def memo_display_name(workspace: Path, memo_id: str) -> str:
 
 
 def memo_display_name_from_records(memo: dict[str, Any], review: dict[str, Any], memo_id: str) -> str:
-    borrower = memo.get("borrower_name_or_hash") or Path(memo.get("source_file_name", memo_id)).stem
+    customer = memo.get("customer_id") or Path(memo.get("source_file_name", memo_id)).stem
     status = STATUS_LABELS.get(review.get("status", "Draft"), review.get("status", "Draft"))
-    return f"{borrower} - {memo.get('memo_type', 'Memo')} - {status}"
+    return f"{customer} - {memo.get('memo_type', 'Memo')} - {status}"
 
 
 def memo_display_labels(workspace: Path, memo_ids: list[str]) -> dict[str, str]:
@@ -156,6 +162,22 @@ def text_quality_complete(workspace: Path, memo_id: str) -> bool:
         or (record.get("status") == "Ready" and record.get("disposition") != "Unable to read")
         for record in page_quality
     )
+
+
+def outcome_event_severity(event_type: str) -> int:
+    severity_lookup = {str(item.get("event_type")): int(item.get("severity_rank", 0)) for item in DEFAULT_OUTCOME_EVENT_TYPES}
+    return severity_lookup.get(event_type, 0)
+
+
+def derive_primary_outcome(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not events:
+        return None
+
+    def sort_key(event: dict[str, Any]) -> tuple[int, str]:
+        severity = int(event.get("severity_rank") or outcome_event_severity(str(event.get("event_type", ""))))
+        return (-severity, str(event.get("event_date") or "9999-12-31"))
+
+    return sorted(events, key=sort_key)[0]
 
 
 def candidate_for_section(section: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -214,7 +236,7 @@ def step_summary(workspace: Path, memo_id: str | None) -> dict[str, str]:
     quality_complete = text_quality_complete(workspace, memo_id)
     sections_complete = bool(sections) and not gaps and all(section.get("reviewer_confirmed") for section in sections)
     facilities = load_facilities(workspace, memo_id)
-    outcomes = load_outcomes(workspace, memo_id)
+    outcome_summaries = load_outcome_summaries(workspace, memo_id)
     confirmed_facilities = [facility for facility in facilities if facility.get("status") == "Confirmed" or facility.get("reviewer_confirmed")]
     tags_complete = not quality_findings(workspace, memo_id)[0]
     approved = review.get("status") == "Approved Gold"
@@ -226,7 +248,7 @@ def step_summary(workspace: Path, memo_id: str | None) -> dict[str, str]:
         "Confirm Sections": "Complete" if sections_complete else ("Needs Review" if quality_complete else "Not Started"),
         "Set Up Facilities": "Complete" if confirmed_facilities else ("Needs Review" if sections_complete else "Not Started"),
         "Tag Credit Review": "Complete" if tags_complete else ("Needs Review" if confirmed_facilities else "Not Started"),
-        "Tag Outcomes": "Complete" if outcomes else ("Needs Review" if confirmed_facilities else "Not Started"),
+        "Tag Outcomes": "Complete" if outcome_summaries else ("Needs Review" if confirmed_facilities else "Not Started"),
         "Quality Check": "Complete" if approved else ("Needs Review" if tags_complete else "Not Started"),
         "Download Results": "Complete" if exported else ("Needs Review" if approved else "Not Started"),
     }
@@ -251,7 +273,9 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
     page_quality = load_page_quality(workspace, memo_id)
     warnings = load_extraction_warnings(workspace, memo_id)
     facilities = load_facilities(workspace, memo_id)
-    outcomes = load_outcomes(workspace, memo_id)
+    outcome_summaries = load_outcome_summaries(workspace, memo_id)
+    outcome_events = load_outcome_events(workspace, memo_id)
+    foreseeability_assessments = load_foreseeability_assessments(workspace, memo_id)
     if not page_quality:
         findings.append("Text quality has not been reviewed.")
     else:
@@ -320,8 +344,74 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
     if not confirmed_facilities:
         findings.append("At least one facility must be confirmed before approval.")
 
-    if not outcomes:
-        findings.append("Outcome tagging must be completed, even if the outcome is Unknown / Not seasoned yet.")
+    summary_by_facility = {str(summary.get("facility_id", "")): summary for summary in outcome_summaries}
+    events_by_facility: dict[str, list[dict[str, Any]]] = {}
+    for event in outcome_events:
+        events_by_facility.setdefault(str(event.get("facility_id", "")), []).append(event)
+    assessments_by_event = {str(assessment.get("outcome_event_id", "")): assessment for assessment in foreseeability_assessments}
+    if confirmed_facilities and not outcome_summaries:
+        findings.append("Outcome tagging must be completed for each confirmed facility.")
+
+    for facility in confirmed_facilities:
+        facility_id = str(facility.get("facility_id", ""))
+        facility_name = str(facility.get("facility_name") or facility_id)
+        summary = summary_by_facility.get(facility_id)
+        if not summary:
+            findings.append(f"{facility_name} needs an outcome availability state.")
+            continue
+        state = str(summary.get("outcome_availability_state") or "Outcome Not Checked")
+        if state == "Outcome Not Checked":
+            findings.append(f"{facility_name} outcome is not checked.")
+        if state in {"Known Outcome", "Not Seasoned Yet", "No Adverse Outcome Observed"} and not str(facility.get("closing_date", "")).strip():
+            findings.append(f"{facility_name} needs a facility closing date for outcome seasoning.")
+        if state == "Outcome Data Unavailable" and not str(summary.get("source_note", "")).strip():
+            findings.append(f"{facility_name} outcome data unavailable needs a source note.")
+        if state == "No Adverse Outcome Observed":
+            if not summary.get("source_type"):
+                findings.append(f"{facility_name} no-adverse outcome needs an outcome source type.")
+            if not summary.get("source_checked_date"):
+                findings.append(f"{facility_name} no-adverse outcome needs a source checked date.")
+            if (
+                summary.get("source_type") in {"Reviewer attestation", "Other"}
+                or summary.get("source_confidence") == "Low"
+            ) and not str(summary.get("source_note", "")).strip():
+                findings.append(f"{facility_name} no-adverse outcome needs a source note.")
+        if state != "Known Outcome":
+            continue
+
+        facility_events = events_by_facility.get(facility_id, [])
+        if not facility_events:
+            findings.append(f"{facility_name} is marked Known Outcome but has no adverse outcome events.")
+            continue
+        for event in facility_events:
+            event_label = str(event.get("event_type") or "Outcome event")
+            if not event.get("event_type"):
+                findings.append(f"{facility_name} has an outcome event without an event type.")
+            if not event.get("event_date"):
+                findings.append(f"{facility_name} {event_label} needs an event date.")
+            if not event.get("source_type"):
+                findings.append(f"{facility_name} {event_label} needs a source type.")
+            if not event.get("source_checked_date"):
+                findings.append(f"{facility_name} {event_label} needs a source checked date.")
+            if (
+                event.get("source_type") in {"Reviewer attestation", "Other"}
+                or event.get("source_confidence") == "Low"
+            ) and not str(event.get("source_note", "")).strip():
+                findings.append(f"{facility_name} {event_label} needs a source note.")
+
+        primary = derive_primary_outcome(facility_events)
+        if not primary:
+            continue
+        primary_event_id = str(primary.get("outcome_event_id", ""))
+        assessment = assessments_by_event.get(primary_event_id)
+        if not assessment:
+            findings.append(f"{facility_name} primary adverse outcome needs a foreseeability assessment.")
+            continue
+        foreseeability = str(assessment.get("foreseeability") or "Not assessed")
+        if foreseeability == "Not assessed":
+            findings.append(f"{facility_name} primary adverse outcome foreseeability is not assessed.")
+        if foreseeability in {"Visible in memo", "Partially visible"} and not assessment.get("memo_evidence_ids"):
+            findings.append(f"{facility_name} {foreseeability} needs linked memo evidence.")
 
     if not tags:
         findings.append("No credit tags have been saved yet.")
@@ -332,6 +422,11 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
         findings.append(f"{len(untagged_sections)} confirmed section(s) do not have saved tags.")
 
     evidence_ids = {item.get("evidence_id") for item in evidence}
+    memo_evidence_ids = {item.get("evidence_id") for item in evidence if item.get("evidence_type", "memo_evidence") == "memo_evidence"}
+    for assessment in foreseeability_assessments:
+        missing_memo_evidence = [item for item in assessment.get("memo_evidence_ids", []) if item not in memo_evidence_ids]
+        if missing_memo_evidence:
+            findings.append("Foreseeability assessment has missing memo evidence links.")
     tag_defs = {definition.tag_id: definition for definition in load_tag_defs(workspace)}
     section_defs_by_key = {definition.section_id: definition for definition in section_defs}
     missing_required_tags: list[str] = []
@@ -375,7 +470,9 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
         "evidence_total": len(evidence),
         "facilities_total": len(facilities),
         "facilities_confirmed": len(confirmed_facilities),
-        "outcomes_total": len(outcomes),
+        "outcomes_total": len(outcome_summaries),
+        "outcome_events_total": len(outcome_events),
+        "foreseeability_total": len(foreseeability_assessments),
     }
     return findings, metrics
 

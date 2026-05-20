@@ -9,7 +9,14 @@ import pandas as pd
 import streamlit as st
 
 from tag_studio.app_config import STATUS_LABELS, TAG_CATEGORY_ORDER
-from tag_studio.defaults import DEFAULT_FACILITY_TYPES, DEFAULT_MEMO_TYPES, DEFAULT_OUTCOME_TAXONOMY, SCHEMA_VERSION
+from tag_studio.defaults import (
+    DEFAULT_FACILITY_TYPES,
+    DEFAULT_MEMO_TYPES,
+    DEFAULT_OUTCOME_AVAILABILITY_STATES,
+    DEFAULT_OUTCOME_EVENT_TYPES,
+    DEFAULT_OUTCOME_SOURCE_TYPES,
+    SCHEMA_VERSION,
+)
 from tag_studio.document_intelligence import (
     dependency_status,
     load_extraction_warnings,
@@ -24,12 +31,23 @@ from tag_studio.document_intelligence import (
 )
 from tag_studio.exporters import export_excel, export_jsonl, export_memo_bundle
 from tag_studio.extraction import pdf_page_count
-from tag_studio.models import EvidenceRecord, FacilityRecord, OutcomeRecord, TagDefinition, TagRecord, utc_now
+from tag_studio.models import (
+    EvidenceRecord,
+    FacilityOutcomeSummaryRecord,
+    FacilityRecord,
+    ForeseeabilityAssessmentRecord,
+    OutcomeEventRecord,
+    TagDefinition,
+    TagRecord,
+    utc_now,
+)
 from tag_studio.sectioning import propose_sections, required_section_gaps
 from tag_studio.services import (
     candidate_for_section,
+    derive_primary_outcome,
     load_section_defs,
     memo_display_name,
+    outcome_event_severity,
     quality_findings,
     rebuild_sections_from_page_text,
     save_section_defs,
@@ -45,8 +63,10 @@ from tag_studio.storage import (
     list_memo_ids,
     load_evidence,
     load_facilities,
+    load_foreseeability_assessments,
     load_memo_record,
-    load_outcomes,
+    load_outcome_events,
+    load_outcome_summaries,
     load_review,
     load_sections,
     load_tags,
@@ -54,8 +74,10 @@ from tag_studio.storage import (
     read_json,
     save_evidence,
     save_facilities,
+    save_foreseeability_assessments,
     save_memo_record,
-    save_outcomes,
+    save_outcome_events,
+    save_outcome_summaries,
     save_review,
     save_sections,
     save_tags,
@@ -87,7 +109,7 @@ def _preflight_upload(workspace: Path, file_name: str, pdf_bytes: bytes) -> tupl
     return True, ""
 
 
-def _suggest_facilities(memo_id: str, borrower_id: str, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _suggest_facilities(memo_id: str, customer_id: str, sections: list[dict[str, Any]]) -> list[dict[str, Any]]:
     keywords = {
         "Revolver": ["revolver", "revolving", "line of credit"],
         "Term Loan": ["term loan"],
@@ -110,7 +132,7 @@ def _suggest_facilities(memo_id: str, borrower_id: str, sections: list[dict[str,
                     FacilityRecord(
                         facility_id=f"facility_{slugify(facility_type)}",
                         memo_id=memo_id,
-                        borrower_id=borrower_id,
+                        customer_id=customer_id,
                         facility_name=facility_type,
                         facility_type=facility_type,
                         proposed_from_text=True,
@@ -124,7 +146,7 @@ def _suggest_facilities(memo_id: str, borrower_id: str, sections: list[dict[str,
             FacilityRecord(
                 facility_id="facility_primary",
                 memo_id=memo_id,
-                borrower_id=borrower_id,
+                customer_id=customer_id,
                 facility_name="Primary Facility",
                 facility_type="Multiple",
                 confidence=0.25,
@@ -162,7 +184,10 @@ def add_memo_page(workspace: Path) -> None:
             type=["pdf"],
             help="Choose the memo you want reviewed and tagged. Use a PDF that contains no information outside the review packet.",
         )
-        borrower = st.text_input("Borrower name or internal borrower ID")
+        customer_id = st.text_input(
+            "Customer ID",
+            help="Use the bank-assigned numeric or opaque customer identifier. Do not enter the customer name.",
+        )
         col1, col2 = st.columns(2)
         with col1:
             memo_type = st.selectbox(
@@ -200,7 +225,7 @@ def add_memo_page(workspace: Path) -> None:
         memo_id=memo_id,
         memo_type=memo_type,
         facility_type=facility_type,
-        borrower_name_or_hash=borrower,
+        customer_id=customer_id,
         reviewer=reviewer,
     )
 
@@ -692,7 +717,7 @@ def set_up_facilities_page(workspace: Path, memo_id: str | None) -> None:
     sections = load_sections(workspace, memo_id)
     facilities = load_facilities(workspace, memo_id)
     if not facilities:
-        facilities = _suggest_facilities(memo_id, str(memo.get("borrower_id", "")), sections)
+        facilities = _suggest_facilities(memo_id, str(memo.get("customer_id", "")), sections)
         save_facilities(workspace, memo_id, facilities)
 
     st.caption("Confirm the credit facilities in this memo. Facility-specific tags and outcomes will attach to these records.")
@@ -735,7 +760,7 @@ def set_up_facilities_page(workspace: Path, memo_id: str | None) -> None:
                     FacilityRecord(
                         facility_id=slugify(str(row.get("_facility_id") or f"facility_{name}")),
                         memo_id=memo_id,
-                        borrower_id=str(memo.get("borrower_id", "")),
+                        customer_id=str(memo.get("customer_id", "")),
                         facility_name=name,
                         facility_type=str(row.get("Facility Type") or "Other"),
                         amount=str(row.get("Amount") or ""),
@@ -935,7 +960,7 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
                     section_id=section_id,
                     scope=scopes.get(definition.tag_id, definition.default_scope),  # type: ignore[arg-type]
                     facility_id=facility_id,
-                    borrower_id=str(memo.get("borrower_id", "")),
+                    customer_id=str(memo.get("customer_id", "")),
                     tag_id=definition.tag_id,
                     tag_label=definition.label,
                     value=value,
@@ -962,6 +987,16 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
         st.dataframe(pd.DataFrame(display_rows), width="stretch", hide_index=True)
 
 
+def _source_type_options() -> list[str]:
+    return ["", *DEFAULT_OUTCOME_SOURCE_TYPES]
+
+
+def _memo_evidence_label(evidence: dict[str, Any]) -> str:
+    location = evidence.get("source_location") or f"p.{evidence.get('page_number', '')}"
+    text = str(evidence.get("selected_text", "")).replace("\n", " ")
+    return f"{location}: {text[:90]}"
+
+
 def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
     st.subheader("Tag Outcomes")
     if not memo_id:
@@ -974,68 +1009,199 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
 
     memo = load_memo_record(workspace, memo_id)
     facilities = [facility for facility in load_facilities(workspace, memo_id) if facility.get("status") == "Confirmed" or facility.get("reviewer_confirmed")]
-    outcomes = load_outcomes(workspace, memo_id)
-    outcome_by_facility = {outcome.get("facility_id", ""): outcome for outcome in outcomes}
-    labels = [item["label"] for item in DEFAULT_OUTCOME_TAXONOMY]
-    severity_lookup = {item["label"]: int(item["severity_rank"]) for item in DEFAULT_OUTCOME_TAXONOMY}
-    windows = ["Unknown", "0-6 months", "6-12 months", "12-24 months", "24-36 months", "Life-to-date"]
+    summaries = load_outcome_summaries(workspace, memo_id)
+    outcome_events = load_outcome_events(workspace, memo_id)
+    foreseeability_assessments = load_foreseeability_assessments(workspace, memo_id)
+    memo_evidence = [item for item in load_evidence(workspace, memo_id) if item.get("evidence_type", "memo_evidence") == "memo_evidence"]
+    summary_by_facility = {summary.get("facility_id", ""): summary for summary in summaries}
+    events_by_facility: dict[str, list[dict[str, Any]]] = {}
+    for event in outcome_events:
+        events_by_facility.setdefault(str(event.get("facility_id", "")), []).append(event)
+    assessments_by_event = {assessment.get("outcome_event_id", ""): assessment for assessment in foreseeability_assessments}
+    event_type_options = ["", *[str(item["event_type"]) for item in DEFAULT_OUTCOME_EVENT_TYPES]]
+    source_type_options = _source_type_options()
+    source_confidence_options = ["High", "Medium", "Low"]
+    foreseeability_options = ["Visible in memo", "Partially visible", "Hindsight-only", "Not assessed", "N/A"]
 
-    st.caption("Outcome tagging is part of the dataset. If the deal is new or not seasoned, mark the outcome as unknown.")
-    saved: list[dict[str, Any]] = []
+    st.caption("Outcome tagging is the second pass. Record later facility outcomes separately from the as-of credit review.")
+    saved_summaries: list[dict[str, Any]] = []
+    saved_events: list[dict[str, Any]] = []
+    saved_assessments: list[dict[str, Any]] = []
     facility_closing_dates: dict[str, str] = {}
     with st.form(f"outcomes_{memo_id}"):
         for facility in facilities:
             facility_id = str(facility.get("facility_id"))
-            existing = outcome_by_facility.get(facility_id, {})
+            existing_summary = summary_by_facility.get(facility_id, {})
+            existing_events = events_by_facility.get(facility_id, [])
+            existing_primary = derive_primary_outcome(existing_events)
+            existing_assessment = assessments_by_event.get(str(existing_primary.get("outcome_event_id"))) if existing_primary else {}
             st.markdown(f"##### {facility.get('facility_name')} ({facility.get('facility_type')})")
             col1, col2, col3 = st.columns(3)
             with col1:
-                outcome_label = st.selectbox(
-                    "Outcome",
-                    labels,
-                    index=labels.index(existing.get("outcome_label")) if existing.get("outcome_label") in labels else 0,
-                    key=f"outcome_label_{memo_id}_{facility_id}",
+                availability_state = st.selectbox(
+                    "Outcome Availability State",
+                    DEFAULT_OUTCOME_AVAILABILITY_STATES,
+                    index=DEFAULT_OUTCOME_AVAILABILITY_STATES.index(existing_summary.get("outcome_availability_state"))
+                    if existing_summary.get("outcome_availability_state") in DEFAULT_OUTCOME_AVAILABILITY_STATES
+                    else DEFAULT_OUTCOME_AVAILABILITY_STATES.index("Outcome Not Checked"),
+                    key=f"outcome_state_{memo_id}_{facility_id}",
                 )
-                event_date = st.text_input("Outcome event date", value=existing.get("event_date", ""), key=f"outcome_date_{memo_id}_{facility_id}")
+                seasoning_months = st.number_input(
+                    "Seasoning window months",
+                    min_value=1,
+                    max_value=120,
+                    value=int(existing_summary.get("seasoning_months") or 12),
+                    key=f"seasoning_{memo_id}_{facility_id}",
+                )
             with col2:
                 closing_date = st.text_input("Facility closing date", value=facility.get("closing_date", ""), key=f"closing_date_{memo_id}_{facility_id}")
                 facility_closing_dates[facility_id] = closing_date
-                outcome_window = st.selectbox(
-                    "Outcome window from closing",
-                    windows,
-                    index=windows.index(existing.get("outcome_window")) if existing.get("outcome_window") in windows else 0,
-                    key=f"outcome_window_{memo_id}_{facility_id}",
+                summary_source_type = st.selectbox(
+                    "Summary source type",
+                    source_type_options,
+                    index=source_type_options.index(existing_summary.get("source_type")) if existing_summary.get("source_type") in source_type_options else 0,
+                    key=f"summary_source_type_{memo_id}_{facility_id}",
                 )
             with col3:
-                knew = st.selectbox(
-                    "Reviewer knew outcome",
-                    ["Yes", "No", "Unclear"],
-                    index=["Yes", "No", "Unclear"].index(existing.get("reviewer_knew_outcome", "Unclear")),
-                    key=f"knew_outcome_{memo_id}_{facility_id}",
+                summary_checked_date = st.text_input(
+                    "Summary source checked date",
+                    value=existing_summary.get("source_checked_date", ""),
+                    key=f"summary_checked_{memo_id}_{facility_id}",
                 )
+                summary_confidence = st.selectbox(
+                    "Summary source confidence",
+                    source_confidence_options,
+                    index=source_confidence_options.index(existing_summary.get("source_confidence", "Medium"))
+                    if existing_summary.get("source_confidence", "Medium") in source_confidence_options
+                    else 1,
+                    key=f"summary_confidence_{memo_id}_{facility_id}",
+                )
+            summary_note = st.text_area(
+                "Summary source note",
+                value=existing_summary.get("source_note", ""),
+                key=f"summary_note_{memo_id}_{facility_id}",
+                height=70,
+                help="Required when outcome data is unavailable, source type is Reviewer attestation or Other, or source confidence is Low.",
+            )
+
+            event_rows = [
+                {
+                    "_outcome_event_id": event.get("outcome_event_id"),
+                    "Event Type": event.get("event_type"),
+                    "Event Date": event.get("event_date", ""),
+                    "Source Type": event.get("source_type") or "",
+                    "Source Checked Date": event.get("source_checked_date", ""),
+                    "Source Confidence": event.get("source_confidence", "Medium"),
+                    "Source Note": event.get("source_note", ""),
+                }
+                for event in existing_events
+            ]
+            event_columns = [
+                "_outcome_event_id",
+                "Event Type",
+                "Event Date",
+                "Source Type",
+                "Source Checked Date",
+                "Source Confidence",
+                "Source Note",
+            ]
+            st.markdown("###### Adverse Outcome Events")
+            edited_events = st.data_editor(
+                pd.DataFrame(event_rows, columns=event_columns),
+                num_rows="dynamic",
+                width="stretch",
+                key=f"outcome_events_{memo_id}_{facility_id}",
+                column_config={
+                    "_outcome_event_id": None,
+                    "Event Type": st.column_config.SelectboxColumn("Event Type", options=event_type_options),
+                    "Source Type": st.column_config.SelectboxColumn("Source Type", options=source_type_options),
+                    "Source Confidence": st.column_config.SelectboxColumn("Source Confidence", options=source_confidence_options),
+                },
+            )
+            facility_events: list[dict[str, Any]] = []
+            for row in edited_events.fillna("").to_dict("records"):
+                event_type = str(row.get("Event Type") or "").strip()
+                if not event_type:
+                    continue
+                facility_events.append(
+                    OutcomeEventRecord(
+                        outcome_event_id=str(row.get("_outcome_event_id") or f"outcome_event_{uuid4().hex[:10]}"),
+                        memo_id=memo_id,
+                        facility_id=facility_id,
+                        event_type=event_type,
+                        event_date=str(row.get("Event Date") or ""),
+                        severity_rank=outcome_event_severity(event_type),
+                        source_type=str(row.get("Source Type")) if row.get("Source Type") else None,  # type: ignore[arg-type]
+                        source_checked_date=str(row.get("Source Checked Date") or ""),
+                        source_confidence=str(row.get("Source Confidence") or "Medium"),  # type: ignore[arg-type]
+                        source_note=str(row.get("Source Note") or ""),
+                    ).model_dump()
+                )
+            primary_event = derive_primary_outcome(facility_events)
+            primary_event_id = str(primary_event.get("outcome_event_id", "")) if primary_event else ""
+            if primary_event:
+                st.caption(
+                    f"Primary adverse outcome will be derived as: {primary_event.get('event_type')} "
+                    f"(severity {primary_event.get('severity_rank')})."
+                )
+
+            st.markdown("###### Foreseeability Assessment")
+            assessment = assessments_by_event.get(primary_event_id) if primary_event_id else existing_assessment or {}
+            col_a, col_b = st.columns([1, 1.3])
+            with col_a:
                 foreseeability = st.selectbox(
                     "Foreseeability",
-                    ["Visible in memo", "Partially visible", "Hindsight-only", "Not assessed", "N/A"],
-                    index=["Visible in memo", "Partially visible", "Hindsight-only", "Not assessed", "N/A"].index(existing.get("foreseeability", "Not assessed")),
+                    foreseeability_options,
+                    index=foreseeability_options.index(assessment.get("foreseeability", "Not assessed"))
+                    if assessment.get("foreseeability", "Not assessed") in foreseeability_options
+                    else 3,
                     key=f"foreseeability_{memo_id}_{facility_id}",
                 )
-            rationale = st.text_area("Outcome rationale", value=existing.get("rationale", ""), key=f"outcome_rationale_{memo_id}_{facility_id}", height=80)
-            saved.append(
-                OutcomeRecord(
-                    outcome_id=str(existing.get("outcome_id") or f"outcome_{facility_id}"),
+            with col_b:
+                memo_evidence_ids = st.multiselect(
+                    "Linked memo evidence",
+                    [str(item.get("evidence_id")) for item in memo_evidence],
+                    default=[item for item in assessment.get("memo_evidence_ids", []) if item in {e.get("evidence_id") for e in memo_evidence}],
+                    format_func=lambda evidence_id: _memo_evidence_label(next((item for item in memo_evidence if item.get("evidence_id") == evidence_id), {})),
+                    key=f"foreseeability_evidence_{memo_id}_{facility_id}",
+                    help="Required when foreseeability is Visible in memo or Partially visible.",
+                )
+            rationale = st.text_area("Foreseeability rationale", value=assessment.get("rationale", ""), key=f"outcome_rationale_{memo_id}_{facility_id}", height=80)
+
+            saved_events.extend(facility_events)
+            saved_summaries.append(
+                FacilityOutcomeSummaryRecord(
+                    outcome_summary_id=str(existing_summary.get("outcome_summary_id") or f"outcome_summary_{facility_id}"),
                     memo_id=memo_id,
-                    borrower_id=str(memo.get("borrower_id", "")),
+                    customer_id=str(memo.get("customer_id", "")),
                     facility_id=facility_id,
-                    outcome_label=outcome_label,
-                    severity_rank=severity_lookup.get(outcome_label, 0),
-                    event_date=event_date,
-                    date_basis="facility_closing_date",
-                    outcome_window=outcome_window,
-                    reviewer_knew_outcome=knew,  # type: ignore[arg-type]
-                    foreseeability=foreseeability,  # type: ignore[arg-type]
-                    rationale=rationale,
+                    outcome_availability_state=availability_state,  # type: ignore[arg-type]
+                    seasoning_months=int(seasoning_months),
+                    primary_adverse_outcome=str(primary_event.get("event_type", "")) if primary_event else "",
+                    primary_outcome_event_id=primary_event_id,
+                    primary_event_date=str(primary_event.get("event_date", "")) if primary_event else "",
+                    primary_severity_rank=int(primary_event.get("severity_rank", 0)) if primary_event else 0,
+                    no_adverse_outcome_observed_date=summary_checked_date if availability_state == "No Adverse Outcome Observed" else "",
+                    source_type=summary_source_type or None,  # type: ignore[arg-type]
+                    source_checked_date=summary_checked_date,
+                    source_confidence=summary_confidence,  # type: ignore[arg-type]
+                    source_note=summary_note,
+                    approval_ready=availability_state != "Outcome Not Checked",
                 ).model_dump()
             )
+            if primary_event_id:
+                saved_assessments.append(
+                    ForeseeabilityAssessmentRecord(
+                        foreseeability_id=str(assessment.get("foreseeability_id") or f"foreseeability_{primary_event_id}"),
+                        memo_id=memo_id,
+                        facility_id=facility_id,
+                        outcome_event_id=primary_event_id,
+                        foreseeability=foreseeability,  # type: ignore[arg-type]
+                        memo_evidence_ids=memo_evidence_ids,
+                        rationale=rationale,
+                    ).model_dump()
+                )
+            st.divider()
         submitted = st.form_submit_button("Save Outcomes", type="primary")
     if submitted:
         updated_facilities = []
@@ -1046,7 +1212,9 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
                 facility["updated_at"] = utc_now()
             updated_facilities.append(facility)
         save_facilities(workspace, memo_id, updated_facilities)
-        save_outcomes(workspace, memo_id, saved)
+        save_outcome_summaries(workspace, memo_id, saved_summaries)
+        save_outcome_events(workspace, memo_id, saved_events)
+        save_foreseeability_assessments(workspace, memo_id, saved_assessments)
         st.success("Outcome tags saved.")
         st.session_state["selected_step"] = "Quality Check"
         st.rerun()
@@ -1172,15 +1340,27 @@ def download_results_page(workspace: Path, memo_id: str | None) -> None:
             prepared["span_training"] = str(paths["spans"])
             prepared["section_training"] = str(paths["sections"])
             prepared["memo_training"] = str(paths["memos"])
+            prepared["outcome_training"] = str(paths["outcomes"])
+            prepared["training_audit"] = str(paths["audit"])
+            prepared["training_manifest"] = str(paths["manifest"])
         span_training_path = Path(prepared["span_training"]) if prepared.get("span_training") else None
         section_training_path = Path(prepared["section_training"]) if prepared.get("section_training") else None
         memo_training_path = Path(prepared["memo_training"]) if prepared.get("memo_training") else None
+        outcome_training_path = Path(prepared["outcome_training"]) if prepared.get("outcome_training") else None
+        training_audit_path = Path(prepared["training_audit"]) if prepared.get("training_audit") else None
+        training_manifest_path = Path(prepared["training_manifest"]) if prepared.get("training_manifest") else None
         if span_training_path and span_training_path.exists():
             st.download_button("Download Evidence Training File", data=span_training_path.read_bytes(), file_name=span_training_path.name)
         if section_training_path and section_training_path.exists():
             st.download_button("Download Section Training File", data=section_training_path.read_bytes(), file_name=section_training_path.name)
         if memo_training_path and memo_training_path.exists():
             st.download_button("Download Memo Training File", data=memo_training_path.read_bytes(), file_name=memo_training_path.name)
+        if outcome_training_path and outcome_training_path.exists():
+            st.download_button("Download Outcome Training File", data=outcome_training_path.read_bytes(), file_name=outcome_training_path.name)
+        if training_audit_path and training_audit_path.exists():
+            st.download_button("Download Training Audit File", data=training_audit_path.read_bytes(), file_name=training_audit_path.name)
+        if training_manifest_path and training_manifest_path.exists():
+            st.download_button("Download Training Export Manifest", data=training_manifest_path.read_bytes(), file_name=training_manifest_path.name)
     with col3:
         st.markdown('<div class="soft-panel"><b>Audit Package</b><br><span class="small-muted">Traceability package for QA.</span></div>', unsafe_allow_html=True)
         if st.button(
