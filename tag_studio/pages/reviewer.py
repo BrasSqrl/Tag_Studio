@@ -160,18 +160,25 @@ def add_memo_page(workspace: Path) -> None:
 
     memo_ids = list_memo_ids(workspace)
     if memo_ids:
-        st.markdown("##### Current Memo")
+        st.markdown("##### Continue an Existing Memo")
+        st.caption("Use this when the memo has already been uploaded. Choose it here, then continue with the review steps on the left.")
         labels = {memo_id: memo_display_name(workspace, memo_id) for memo_id in memo_ids}
         active = st.session_state.get("active_memo_id") or memo_ids[0]
         active = st.selectbox(
-            "Choose a memo to work on",
+            "Existing memo",
             memo_ids,
             index=memo_ids.index(active) if active in memo_ids else 0,
             format_func=lambda memo_id: labels.get(memo_id, memo_id),
+            help="This only selects a memo that is already in Tag Studio. It does not upload or read a new PDF.",
         )
         st.session_state["active_memo_id"] = active
+        if st.button("Continue Selected Memo", type="primary"):
+            st.session_state["selected_step"] = "Review Text Quality"
+            st.rerun()
 
-    st.markdown("##### Add a New Credit Memo")
+    st.divider()
+    st.markdown("##### Upload a New Credit Memo")
+    st.caption("Use this only when you need to add a new PDF to Tag Studio.")
     deps = dependency_status()
     if not deps.get("tesseract"):
         st.warning(
@@ -204,12 +211,12 @@ def add_memo_page(workspace: Path) -> None:
                 help="Pick the main facility type so Tag Studio can apply the right section and tagging expectations.",
             )
         reviewer = st.text_input("Reviewer name")
-        submitted = st.form_submit_button("Read Memo", type="primary")
+        submitted = st.form_submit_button("Read Uploaded Memo", type="primary")
 
     if not submitted:
         return
     if uploaded is None:
-        st.error("Choose a credit memo PDF before continuing.")
+        st.error("Choose a new credit memo PDF before reading the uploaded memo.")
         return
     pdf_bytes = uploaded.getvalue()
     ok, preflight_message = _preflight_upload(workspace, uploaded.name, pdf_bytes)
