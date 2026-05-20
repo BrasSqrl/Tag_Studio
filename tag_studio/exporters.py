@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +22,7 @@ from .storage import (
 
 
 def _now_stamp() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
 
 def _approved_memo_ids(workspace: Path, include_only_approved: bool) -> list[str]:
@@ -83,7 +83,7 @@ def build_export_tables(workspace: Path, include_only_approved: bool = True) -> 
     tables["Export Manifest"].append(
         {
             "schema_version": SCHEMA_VERSION,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
             "include_only_approved": include_only_approved,
             "memo_count": len(memo_ids),
             "memo_ids": ", ".join(memo_ids),
@@ -260,7 +260,7 @@ def export_jsonl(workspace: Path, include_only_approved: bool = True) -> dict[st
                         "schema_version": SCHEMA_VERSION,
                         "source_hash": memo.get("source_hash", ""),
                         "review_status": review.get("status"),
-                        "exported_at": datetime.now(timezone.utc).isoformat(),
+                        "exported_at": datetime.now(UTC).isoformat(),
                     }
                 )
                 + "\n"

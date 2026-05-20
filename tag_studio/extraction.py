@@ -7,7 +7,6 @@ from PIL import Image
 
 from .models import PageText
 
-
 MIN_TEXT_CHARS_PER_PAGE = 80
 
 

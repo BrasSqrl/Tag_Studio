@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from .models import SectionDefinition, TagDefinition
 
-
 SCHEMA_VERSION = "tag_studio_craig_v1"
 
 

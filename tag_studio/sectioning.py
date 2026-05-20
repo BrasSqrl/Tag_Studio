@@ -5,7 +5,6 @@ from difflib import SequenceMatcher
 
 from .models import SectionCandidateRecord, SectionDefinition, SectionRecord
 
-
 HEADING_MAX_WORDS = 12
 MATCH_THRESHOLD = 0.72
 

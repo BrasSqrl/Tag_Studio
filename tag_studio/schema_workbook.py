@@ -11,7 +11,6 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from .defaults import DEFAULT_FACILITY_TYPES, DEFAULT_MEMO_TYPES, SCHEMA_VERSION
 from .models import SectionDefinition, TagDefinition
 
-
 SECTION_SHEET = "Standard Memo Sections"
 TAG_SHEET = "Credit Tags"
 INSTRUCTIONS_SHEET = "Instructions"
@@ -88,7 +87,7 @@ def _parse_bool(value: Any, field_name: str, row_number: int, default: bool = Fa
         return default
     if isinstance(value, bool):
         return value
-    if isinstance(value, int | float):
+    if isinstance(value, (int, float)):
         return bool(value)
     normalized = str(value).strip().lower()
     if normalized in {"true", "yes", "y", "1", "required"}:

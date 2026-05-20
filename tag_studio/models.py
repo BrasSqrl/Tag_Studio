@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-
 
 ReviewStatus = Literal["Draft", "Ready for Review", "Changes Requested", "Approved Gold", "Exported"]
 ExtractionMethod = Literal["local_pdf_text", "local_ocr", "aws_textract_optional", "manual_correction"]
@@ -13,7 +12,7 @@ LayoutBlockType = Literal["heading", "paragraph", "table", "handwritten_note", "
 
 
 def utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class SectionDefinition(BaseModel):

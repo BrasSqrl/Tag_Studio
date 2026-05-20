@@ -5,15 +5,13 @@ import json
 import os
 import shutil
 from functools import lru_cache
-from pathlib import Path
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from filelock import FileLock
 
 from .defaults import DEFAULT_SECTIONS, DEFAULT_TAGS, SCHEMA_VERSION
 from .models import MemoRecord, ReviewRecord, utc_now
-
 
 DEFAULT_WORKSPACE = Path(os.getenv("TAG_STUDIO_LOCAL_WORKSPACE", "tag_studio_workspace"))
 S3_INDEX_RELATIVE_PATH = "memos/index.json"
@@ -299,9 +297,8 @@ def write_json(path: Path, data: Any) -> None:
 def append_jsonl(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = FileLock(str(path) + ".lock")
-    with lock:
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(data, ensure_ascii=False) + "\n")
+    with lock, path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(data, ensure_ascii=False) + "\n")
     workspace = _workspace_for_path(path)
     if workspace:
         sync_path_to_remote(workspace, path)

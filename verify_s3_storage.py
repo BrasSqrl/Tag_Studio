@@ -7,7 +7,6 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-
 os.environ["TAG_STUDIO_STORAGE_BACKEND"] = "s3"
 os.environ["TAG_STUDIO_LOCAL_WORKSPACE"] = "tag_studio_s3_mock_workspace"
 os.environ["TAG_STUDIO_S3_BUCKET"] = "tag-studio-test-bucket"
