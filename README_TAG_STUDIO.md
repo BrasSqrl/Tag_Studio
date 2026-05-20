@@ -13,7 +13,7 @@ For normal users, double-click:
 For admin/debug use, run Streamlit directly:
 
 ```powershell
-python -m streamlit run tag_studio\app.py
+python -m streamlit run tag_studio_launcher.py
 ```
 
 ## What It Does

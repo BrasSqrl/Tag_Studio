@@ -128,13 +128,13 @@ def main() -> None:
     route_reviewer_page(workspace, active_memo_id, selected_step)
 
 
-def _running_under_streamlit() -> bool:
+def _running_this_file_under_streamlit() -> bool:
     try:
         from streamlit.runtime.scriptrunner import get_script_run_ctx
     except Exception:  # pragma: no cover - Streamlit import guard.
         return False
-    return get_script_run_ctx() is not None
+    return get_script_run_ctx() is not None and Path(sys.argv[0]).resolve() == Path(__file__).resolve()
 
 
-if __name__ == "__main__" or _running_under_streamlit():
+if __name__ == "__main__" or _running_this_file_under_streamlit():
     main()

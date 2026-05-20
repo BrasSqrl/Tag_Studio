@@ -68,7 +68,7 @@ if not errorlevel 1 (
 
 echo Opening Tag Studio in your browser.
 start "" "http://localhost:8501"
-".venv\Scripts\python.exe" -m streamlit run tag_studio\app.py --server.port 8501
+".venv\Scripts\python.exe" -m streamlit run tag_studio_launcher.py --server.port 8501 --server.headless true
 if errorlevel 1 (
     echo.
     echo Tag Studio could not start.
