@@ -7,6 +7,20 @@ cd "${SCRIPT_DIR}"
 APP_PORT="${TAG_STUDIO_PORT:-8501}"
 APP_ADDRESS="${TAG_STUDIO_ADDRESS:-0.0.0.0}"
 VENV_DIR="${TAG_STUDIO_VENV_DIR:-.venv}"
+PROXY_PREFIX="${TAG_STUDIO_PROXY_PREFIX:-${JUPYTERHUB_SERVICE_PREFIX:-/}}"
+
+if [[ "${PROXY_PREFIX}" != /* ]]; then
+  PROXY_PREFIX="/${PROXY_PREFIX}"
+fi
+if [[ "${PROXY_PREFIX}" != */ ]]; then
+  PROXY_PREFIX="${PROXY_PREFIX}/"
+fi
+PROXY_PATH="${PROXY_PREFIX}proxy/${APP_PORT}/"
+if [[ -n "${TAG_STUDIO_STUDIO_URL:-}" ]]; then
+  PROXY_URL="${TAG_STUDIO_STUDIO_URL%/}${PROXY_PATH}"
+else
+  PROXY_URL="${PROXY_PATH}"
+fi
 
 echo "Tag Studio SageMaker startup"
 echo "Repository: ${SCRIPT_DIR}"
@@ -93,11 +107,16 @@ if [[ "${TAG_STUDIO_SETUP_ONLY:-0}" == "1" ]]; then
   exit 0
 fi
 
+export STREAMLIT_SERVER_HEADLESS=true
+export STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
 echo ""
 echo "Starting Tag Studio on port ${APP_PORT}"
-echo "In SageMaker Studio, open the matching proxy URL, usually one of:"
-echo "  /proxy/${APP_PORT}/"
-echo "  /jupyter/default/proxy/${APP_PORT}/"
+echo "Use the SageMaker proxy URL, not the IDE preview:"
+echo "  ${PROXY_URL}"
+echo ""
+echo "If your browser needs the full Studio host, paste the path above after your SageMaker Studio domain."
+echo "If the IDE opens an embedded preview anyway, close it and use the proxy URL."
 echo ""
 echo "Keep this terminal running. Press Ctrl+C here to stop Tag Studio."
 
@@ -106,4 +125,5 @@ exec python -m streamlit run tag_studio_launcher.py \
   --server.address "${APP_ADDRESS}" \
   --server.headless true \
   --server.enableCORS false \
-  --server.enableXsrfProtection false
+  --server.enableXsrfProtection false \
+  --browser.gatherUsageStats false

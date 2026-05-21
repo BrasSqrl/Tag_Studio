@@ -11,6 +11,11 @@ The main startup script is:
 That script creates the virtual environment, installs requirements, sets storage
 defaults, checks optional OCR tools, and starts the Streamlit app.
 
+This repo also includes VS Code workspace settings that tell SageMaker/VS Code
+not to auto-open Tag Studio in the embedded IDE preview. If the IDE still opens
+an embedded preview, close that preview and use the SageMaker proxy URL printed
+by the startup script.
+
 
 1) If the repo is not already in SageMaker, clone it
 ----------------------------------------------------
@@ -41,13 +46,13 @@ find ~ -maxdepth 4 -type d -name "Tag_Studio" 2>/dev/null
 bash sagemaker_start_tag_studio.sh
 
 
-4) Open Tag Studio in SageMaker Studio
+4) Open Tag Studio with the SageMaker proxy URL
 --------------------------------------
 
 # Keep the terminal running after Streamlit starts.
-# SageMaker Studio usually exposes Streamlit through a proxy URL.
+# The startup script prints the proxy URL/path to use.
 #
-# Try one of these URL endings in the same SageMaker Studio browser window:
+# It will usually look like one of these:
 #
 #   /proxy/8501/
 #   /jupyter/default/proxy/8501/
@@ -56,6 +61,9 @@ bash sagemaker_start_tag_studio.sh
 #
 #   https://YOUR-STUDIO-URL/proxy/8501/
 #   https://YOUR-STUDIO-URL/jupyter/default/proxy/8501/
+#
+# Use the proxy URL in a normal browser tab. Do not use the embedded IDE preview
+# if SageMaker/VS Code opens one automatically.
 #
 # If neither URL works, open SageMaker Studio's running-app/proxy option for
 # port 8501, or ask your SageMaker administrator how proxy URLs are configured.
@@ -127,6 +135,9 @@ ls
 
 # Confirm the startup script exists:
 ls sagemaker_start_tag_studio.sh
+
+# Confirm the VS Code setting that suppresses embedded port preview exists:
+ls .vscode/settings.json
 
 # If Linux says the script has Windows line endings, run:
 sed -i 's/\r$//' sagemaker_start_tag_studio.sh

@@ -1,0 +1,13 @@
+{
+  "remote.autoForwardPorts": false,
+  "remote.portsAttributes": {
+    "8501": {
+      "label": "Tag Studio - use SageMaker proxy URL",
+      "onAutoForward": "silent"
+    },
+    "8502": {
+      "label": "Tag Studio alternate port - use SageMaker proxy URL",
+      "onAutoForward": "silent"
+    }
+  }
+}
