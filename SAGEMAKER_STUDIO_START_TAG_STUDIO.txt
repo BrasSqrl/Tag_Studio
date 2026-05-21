@@ -1,168 +1,140 @@
-Tag Studio - SageMaker Studio Startup Commands
-================================================
+Tag Studio - SageMaker Studio One-Command Startup
+=================================================
 
 Purpose
 -------
 Use this file when running Tag Studio from a SageMaker Studio terminal on Linux.
-Copy and paste the commands into the SageMaker terminal. Start with Section 1 if
-the repo is already in SageMaker. Start with Section 0 if you still need to clone it.
+The main startup script is:
+
+  sagemaker_start_tag_studio.sh
+
+That script creates the virtual environment, installs requirements, sets storage
+defaults, checks optional OCR tools, and starts the Streamlit app.
 
 
-0) Optional: clone the repo if it is not already in SageMaker
--------------------------------------------------------------
+1) If the repo is not already in SageMaker, clone it
+----------------------------------------------------
 
 cd ~
 git clone https://github.com/BrasSqrl/Tag_Studio.git
 cd Tag_Studio
 
 
-1) Go to the Tag Studio folder
-------------------------------
+2) If the repo is already in SageMaker, go to it
+------------------------------------------------
 
-# If you cloned the repo into your SageMaker home folder:
 cd ~/Tag_Studio
 
-# If that folder does not exist, find the repo folder:
+# If that folder does not exist, find it:
 find ~ -maxdepth 4 -type d -name "Tag_Studio" 2>/dev/null
 
 # Then cd into the folder shown by the find command. Example:
 # cd /home/sagemaker-user/Tag_Studio
 
 
-2) Create and activate a Python virtual environment
----------------------------------------------------
+3) Start Tag Studio with local SageMaker storage
+------------------------------------------------
 
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
+# This is the normal quick-start command.
+# It creates/uses .venv, installs requirements, and starts Streamlit.
 
-
-3) Install Tag Studio Python requirements
------------------------------------------
-
-python -m pip install -r requirements.txt
+bash sagemaker_start_tag_studio.sh
 
 
-4) Optional: install local OCR system tools for scanned PDFs
------------------------------------------------------------
-
-# Tag Studio can read digital PDFs without this section.
-# Scanned/image PDFs need OCR tools such as Tesseract, Ghostscript, and qpdf.
-# SageMaker images vary. Try the conda command first if conda is available.
-
-conda install -y -c conda-forge tesseract ghostscript qpdf
-
-# Check whether OCR tools are available:
-which tesseract || echo "Tesseract is not installed or not on PATH."
-which gs || echo "Ghostscript is not installed or not on PATH."
-which qpdf || echo "qpdf is not installed or not on PATH."
-
-# If conda is not available or the install fails, ask your SageMaker/admin team
-# to add Tesseract, Ghostscript, and qpdf to the SageMaker image.
-
-
-5) Choose storage mode
-----------------------
-
-# Option A: local SageMaker workspace storage.
-# Use this for quick testing. Files are stored under the repo folder.
-
-export TAG_STUDIO_STORAGE_BACKEND=local
-export TAG_STUDIO_LOCAL_WORKSPACE="$PWD/tag_studio_workspace"
-
-
-# Option B: S3-backed shared storage.
-# Use this when multiple SageMaker users need the same memo queue and outputs.
-# Replace the bucket and prefix values before running.
-
-# export TAG_STUDIO_STORAGE_BACKEND=s3
-# export TAG_STUDIO_S3_BUCKET="your-s3-bucket-name"
-# export TAG_STUDIO_S3_PREFIX="tag-studio/sagemaker"
-# export AWS_REGION="us-east-1"
-
-
-6) Start Tag Studio
--------------------
-
-streamlit run tag_studio_launcher.py \
-  --server.port 8501 \
-  --server.address 0.0.0.0 \
-  --server.headless true \
-  --server.enableCORS false \
-  --server.enableXsrfProtection false
-
-
-7) Open the app in SageMaker Studio
------------------------------------
+4) Open Tag Studio in SageMaker Studio
+--------------------------------------
 
 # Keep the terminal running after Streamlit starts.
-# SageMaker Studio usually exposes apps through a proxy URL.
+# SageMaker Studio usually exposes Streamlit through a proxy URL.
 #
-# Try one of these URL patterns in a browser tab:
+# Try one of these URL endings in the same SageMaker Studio browser window:
 #
-#   If your current Studio URL ends with /lab or /tree, replace that ending with:
 #   /proxy/8501/
-#
-#   If your Studio URL contains /jupyter/default/lab, replace /lab with:
-#   /proxy/8501/
+#   /jupyter/default/proxy/8501/
 #
 # Examples:
 #
 #   https://YOUR-STUDIO-URL/proxy/8501/
 #   https://YOUR-STUDIO-URL/jupyter/default/proxy/8501/
 #
-# If neither URL works, open SageMaker Studio's running-app/proxy option for port 8501,
-# or ask your SageMaker administrator how Studio proxy URLs are configured.
+# If neither URL works, open SageMaker Studio's running-app/proxy option for
+# port 8501, or ask your SageMaker administrator how proxy URLs are configured.
 
 
-8) Stop Tag Studio
+5) Stop Tag Studio
 ------------------
 
 # Click in the terminal where Streamlit is running, then press:
 # Ctrl+C
 
 
-9) Restart later
+6) Restart later
 ----------------
 
 cd ~/Tag_Studio
-source .venv/bin/activate
-
-export TAG_STUDIO_STORAGE_BACKEND=local
-export TAG_STUDIO_LOCAL_WORKSPACE="$PWD/tag_studio_workspace"
-
-streamlit run tag_studio_launcher.py \
-  --server.port 8501 \
-  --server.address 0.0.0.0 \
-  --server.headless true \
-  --server.enableCORS false \
-  --server.enableXsrfProtection false
+bash sagemaker_start_tag_studio.sh
 
 
-10) Quick troubleshooting commands
+7) Use S3-backed storage instead of local storage
+-------------------------------------------------
+
+# Use this when multiple SageMaker users need the same memo queue and outputs.
+# Replace the bucket, prefix, and region before running.
+
+cd ~/Tag_Studio
+export TAG_STUDIO_STORAGE_BACKEND=s3
+export TAG_STUDIO_S3_BUCKET="your-s3-bucket-name"
+export TAG_STUDIO_S3_PREFIX="tag-studio/sagemaker"
+export AWS_REGION="us-east-1"
+bash sagemaker_start_tag_studio.sh
+
+
+8) Optional: install OCR system tools for scanned PDFs
+------------------------------------------------------
+
+# Digital PDFs do not need this.
+# Scanned/image PDFs need OCR tools such as Tesseract, Ghostscript, and qpdf.
+# If your SageMaker image has conda, this command asks the startup script to
+# install those tools before starting the app.
+
+cd ~/Tag_Studio
+TAG_STUDIO_INSTALL_OCR_TOOLS=1 bash sagemaker_start_tag_studio.sh
+
+
+9) Setup only, without starting Streamlit
+-----------------------------------------
+
+cd ~/Tag_Studio
+TAG_STUDIO_SETUP_ONLY=1 bash sagemaker_start_tag_studio.sh
+
+
+10) Use a different Streamlit port
+----------------------------------
+
+cd ~/Tag_Studio
+TAG_STUDIO_PORT=8502 bash sagemaker_start_tag_studio.sh
+
+# Then open the matching proxy URL:
+# /proxy/8502/
+
+
+11) Quick troubleshooting commands
 ----------------------------------
 
 # Confirm you are in the repo:
 pwd
 ls
 
-# Confirm Python and Streamlit are using the virtual environment:
+# Confirm the startup script exists:
+ls sagemaker_start_tag_studio.sh
+
+# If Linux says the script has Windows line endings, run:
+sed -i 's/\r$//' sagemaker_start_tag_studio.sh
+
+# Confirm Python and Streamlit are installed in the virtual environment:
+source .venv/bin/activate
 which python
-which streamlit
+python -m streamlit --version
 
-# Confirm the app file exists:
-ls tag_studio_launcher.py
-
-# Confirm Streamlit is installed:
-streamlit --version
-
-# If port 8501 is already busy, start on another port:
-streamlit run tag_studio_launcher.py \
-  --server.port 8502 \
-  --server.address 0.0.0.0 \
-  --server.headless true \
-  --server.enableCORS false \
-  --server.enableXsrfProtection false
-
-# Then open the matching proxy URL for port 8502:
-# /proxy/8502/
+# Re-run setup and start:
+bash sagemaker_start_tag_studio.sh
