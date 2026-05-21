@@ -4,6 +4,7 @@ __pycache__/
 .pytest_cache/
 .streamlit/
 .codex_tmp/
+old/
 tag_studio_workspace/
 tag_studio_test_workspace/
 tag_studio_s3_mock_workspace/
