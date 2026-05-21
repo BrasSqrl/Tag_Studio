@@ -200,6 +200,102 @@ _Avoid_: Initial pass, blind review
 The second tagging pass, focused on facility-level outcome, event timing, seasoning state, outcome source, and Foreseeability. It is separate from the As-Of Pass even when the same reviewer performs both passes.
 _Avoid_: Hindsight pass, performance review
 
+**Standard Memo Section**:
+A controlled section name used by Tag Studio to normalize different credit memo heading language into consistent review and training structure.
+_Avoid_: Canonical section, schema section
+
+**Original Memo Heading**:
+The heading text that appears in the uploaded memo. Original Memo Heading is preserved for traceability, but it does not replace the Standard Memo Section.
+_Avoid_: Standard section, normalized heading
+
+**Exception-First Section Review**:
+A section review workflow where high-confidence Standard Memo Section matches are treated as ready, and the reviewer focuses on exceptions such as low-confidence matches, missing required sections, duplicate mappings, suspicious boundaries, and text-quality issues.
+_Avoid_: Manual section-by-section approval, full section remapping
+
+**Section Review Exception**:
+A section condition that requires reviewer attention before tagging can proceed. Section Review Exceptions include low-confidence section matches, no standard section match, missing required sections, duplicate standard section mappings, suspicious boundaries, text-quality issues, and reviewer-created missing section records.
+_Avoid_: Every section, routine match
+
+**Ready Section**:
+A detected section whose Standard Memo Section mapping is high-confidence and does not have missing-required, duplicate, suspicious-boundary, or text-quality exceptions. Ready Sections can be reviewed in a collapsed view but should not interrupt the normal workflow.
+_Avoid_: Approved section, ignored section
+
+**Section Exception Resolution**:
+The one-card-at-a-time action that resolves a Section Review Exception by accepting a suggestion, changing the Standard Memo Section, marking a missing section, merging sections, splitting a section, or saving corrected section status. Each resolution saves immediately and removes that exception from the normal review queue.
+_Avoid_: Bulk section form, full section save
+
+**Section Text Preview**:
+A short excerpt of section text shown during Section Exception Resolution so the reviewer can understand the mapping issue without reading the whole section. Full section text remains available on demand.
+_Avoid_: Full text editor, hidden evidence
+
+**Missing Section Exception**:
+A required Standard Memo Section that Tag Studio did not find in the memo. It is resolved by mapping an existing detected section, marking the topic as not addressed in the memo, marking it not applicable when allowed, or adding a manual section when extraction missed it.
+_Avoid_: Detected section, fake section
+
+**Heading Alias**:
+An Original Memo Heading saved as an accepted alternate name for a Standard Memo Section. Heading Aliases should be added deliberately during Section Exception Resolution, not collected from every Ready Section.
+_Avoid_: Every heading, casual alias
+
+**Blocking Section Exception**:
+A Section Review Exception that must be resolved before the workflow can continue, such as unresolved missing required sections, no Standard Memo Section selection, duplicate mappings for required sections, or unresolved text-quality issues in required sections.
+_Avoid_: Warning, optional review item
+
+**Section Warning**:
+A non-blocking section issue that can remain visible without stopping the workflow, such as a low-risk boundary warning, a non-required suspicious boundary, or a table-heavy warning after page text quality has already been reviewed.
+_Avoid_: Blocking exception, required fix
+
+**Facility-Relevant Section Exception**:
+A Blocking Section Exception in a section needed to create reliable facility records, typically Facility Structure, Repayment Analysis, Collateral, Guarantor, Covenant, or facility-type-specific structure sections.
+_Avoid_: Any section warning, all narrative cleanup
+
+**Section Boundary Action**:
+A secondary Section Exception Resolution action used when the reviewer determines a detected section starts or ends in the wrong place. Boundary actions include merge with previous, merge with next, and split at a selected line.
+_Avoid_: Default section review, always-visible split controls
+
+**Review Section Exceptions**:
+The main screen title for the Confirm Sections step. It frames the task as resolving section exceptions rather than manually approving every detected section.
+_Avoid_: Section editor, section mapping form
+
+**All Required Sections Are Ready**:
+The completion state for Confirm Sections when Blocking Section Exceptions are resolved and the memo can continue to facility setup.
+_Avoid_: All sections perfect, no warnings
+
+**Section Match Confidence Threshold**:
+The admin-configured confidence level that determines whether a detected section mapping can be treated as a Ready Section. The default threshold is 80 percent.
+_Avoid_: Reviewer setting, fixed hard-coded score
+
+**Accept Suggestion**:
+A Section Exception Resolution action where the reviewer agrees with Tag Studio's suggested Standard Memo Section. Accept Suggestion saves immediately and removes the exception from the review queue.
+_Avoid_: Save all sections, separate confirmation click
+
+**Ready Sections View**:
+The collapsed-by-default list of Ready Sections shown below blocking exceptions and warnings. It provides audit visibility without distracting from Section Exception Resolution.
+_Avoid_: Main work queue, required review list
+
+**Must Fix Before Continuing**:
+The highest-priority Confirm Sections queue containing Blocking Section Exceptions that prevent progression to facility setup.
+_Avoid_: Warning list, all issues
+
+**Can Review Later**:
+The lower-priority Confirm Sections queue containing Section Warnings that remain visible but do not block progression to facility setup.
+_Avoid_: Required fixes, blockers
+
+**Section Review Status Counts**:
+The compact Confirm Sections summary showing how many items are in Must Fix Before Continuing, Can Review Later, and Ready Sections.
+_Avoid_: Technical metrics, hidden progress
+
+**Section Not Applicable**:
+A Section Exception Resolution outcome used only when the section setup allows the Standard Memo Section to be treated as not applicable for the memo or facility type.
+_Avoid_: Missing required section, not addressed
+
+**Section Not Addressed**:
+A Section Exception Resolution outcome used when a required Standard Memo Section should have been covered but the memo does not address it. This is materially different from Section Not Applicable.
+_Avoid_: Not applicable, optional omission
+
+**Manual Section**:
+A reviewer-created section used only when the memo contains relevant content that extraction or section detection missed. Manual Sections require a Standard Memo Section, Original Memo Heading, page range, section text, and reason.
+_Avoid_: Normal section, shortcut around text quality review
+
 ## Example Dialogue
 
 Dev: "The reviewer knows this loan defaulted. Should the repayment tag say the deal was weak?"

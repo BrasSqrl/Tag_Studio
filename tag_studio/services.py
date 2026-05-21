@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from .app_config import STATUS_LABELS
 from .defaults import DEFAULT_OUTCOME_EVENT_TYPES, SCHEMA_VERSION
-from .document_intelligence import load_extraction_warnings, load_page_quality, load_page_text
+from .document_intelligence import load_extraction_warnings, load_page_quality, load_page_text, load_section_candidates
 from .models import MemoLockRecord, SectionDefinition, TagDefinition
 from .sectioning import propose_section_candidates, propose_sections, required_section_gaps
 from .storage import (
@@ -52,6 +52,52 @@ class MemoBundle:
     page_quality: list[dict[str, Any]]
     page_text: list[dict[str, Any]]
     warnings: list[dict[str, Any]]
+
+
+SECTION_CONFIDENCE_THRESHOLD = 0.8
+FACILITY_RELEVANT_SECTION_IDS = {
+    "facility_structure",
+    "repayment_analysis",
+    "collateral",
+    "covenants_reporting",
+    "guarantor_sponsor",
+}
+
+
+@dataclass(frozen=True)
+class SectionReviewItem:
+    item_id: str
+    queue: str
+    title: str
+    original_heading: str
+    standard_section_id: str = ""
+    standard_section_name: str = ""
+    suggested_section_id: str = ""
+    suggested_section_name: str = ""
+    confidence: float = 0.0
+    reasons: tuple[str, ...] = ()
+    reason_codes: tuple[str, ...] = ()
+    section: dict[str, Any] | None = None
+    section_id: str = ""
+    missing_section_id: str = ""
+    missing_section_name: str = ""
+    required: bool = False
+    facility_relevant: bool = False
+    page_start: int | None = None
+    page_end: int | None = None
+    text_preview: str = ""
+
+
+@dataclass(frozen=True)
+class SectionReviewSummary:
+    must_fix: list[SectionReviewItem]
+    can_review_later: list[SectionReviewItem]
+    ready: list[SectionReviewItem]
+    confidence_threshold: float = SECTION_CONFIDENCE_THRESHOLD
+
+    @property
+    def has_blockers(self) -> bool:
+        return bool(self.must_fix)
 
 
 def load_section_defs(workspace: Path) -> list[SectionDefinition]:
@@ -200,6 +246,185 @@ def candidate_for_section(section: dict[str, Any], candidates: list[dict[str, An
     return sorted(matching, key=lambda item: float(item.get("confidence", 0)), reverse=True)[0]
 
 
+def _definition_applies(definition: SectionDefinition, memo_type: str, facility_type: str) -> bool:
+    memo_match = not definition.memo_types or memo_type in definition.memo_types
+    facility_match = not definition.facility_types or facility_type in definition.facility_types
+    return memo_match and facility_match
+
+
+def _is_facility_relevant(definition: SectionDefinition | None) -> bool:
+    if not definition:
+        return False
+    if definition.section_id in FACILITY_RELEVANT_SECTION_IDS or definition.facility_types:
+        return True
+    searchable = f"{definition.section_id} {definition.display_name}".lower()
+    return any(term in searchable for term in ["facility", "repayment", "collateral", "covenant", "guarantor", "sponsor"])
+
+
+def _section_text_preview(text: str, limit: int = 600) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."
+
+
+def _page_quality_for_section(section: dict[str, Any], page_quality: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    page_start = int(section.get("page_start", 1))
+    page_end = int(section.get("page_end", page_start))
+    return [
+        record
+        for record in page_quality
+        if page_start <= int(record.get("page_number", 0) or 0) <= page_end
+    ]
+
+
+def _section_has_text_quality_issue(section: dict[str, Any], page_quality: list[dict[str, Any]]) -> tuple[bool, bool]:
+    relevant_pages = _page_quality_for_section(section, page_quality)
+    has_warning = any(record.get("status") in {"Needs Review", "Hard to Read", "Possible Handwriting", "Table Heavy"} for record in relevant_pages)
+    has_blocker = any(
+        record.get("disposition") in {"Unable to read", "Needs escalation"}
+        or (record.get("status") in {"Hard to Read", "Possible Handwriting"} and not record.get("reviewer_confirmed"))
+        for record in relevant_pages
+    )
+    return has_warning, has_blocker
+
+
+def _section_has_suspicious_boundary(section: dict[str, Any]) -> bool:
+    text = str(section.get("text", "") or "")
+    line_count = len([line for line in text.splitlines() if line.strip()])
+    text_length = len(text.strip())
+    if section.get("missing_required"):
+        return False
+    return text_length < 120 or line_count > 180 or text_length > 12000
+
+
+def _review_item_queue(
+    reason_codes: list[str],
+    *,
+    required: bool,
+    facility_relevant: bool,
+) -> str:
+    blocking_codes = {"no_standard_section", "missing_required_section"}
+    required_sensitive_codes = {"low_confidence_match", "no_match", "duplicate_standard_section", "blocking_text_quality"}
+    if any(code in blocking_codes for code in reason_codes):
+        return "must_fix"
+    if (required or facility_relevant) and any(code in required_sensitive_codes for code in reason_codes):
+        return "must_fix"
+    if reason_codes:
+        return "can_review_later"
+    return "ready"
+
+
+def classify_section_review(
+    workspace: Path,
+    memo_id: str,
+    confidence_threshold: float = SECTION_CONFIDENCE_THRESHOLD,
+) -> SectionReviewSummary:
+    memo = load_memo_record(workspace, memo_id)
+    sections = load_sections(workspace, memo_id)
+    definitions_list = load_section_defs(workspace)
+    definitions = {definition.section_id: definition for definition in definitions_list}
+    candidates = load_section_candidates(workspace, memo_id)
+    page_quality = load_page_quality(workspace, memo_id)
+    memo_type = str(memo.get("memo_type", ""))
+    facility_type = str(memo.get("facility_type", ""))
+    required_gaps = required_section_gaps(sections, definitions_list, memo_type, facility_type)
+    duplicate_counts: dict[str, int] = {}
+    for section in sections:
+        if section.get("missing_required"):
+            continue
+        canonical_id = str(section.get("canonical_section_id", ""))
+        duplicate_counts[canonical_id] = duplicate_counts.get(canonical_id, 0) + 1
+
+    grouped: dict[str, list[SectionReviewItem]] = {"must_fix": [], "can_review_later": [], "ready": []}
+    for gap in required_gaps:
+        facility_relevant = _is_facility_relevant(gap)
+        item = SectionReviewItem(
+            item_id=f"missing_{gap.section_id}",
+            queue="must_fix",
+            title=f"{gap.display_name} is required and was not found.",
+            original_heading="Not found in memo",
+            standard_section_id=gap.section_id,
+            standard_section_name=gap.display_name,
+            missing_section_id=gap.section_id,
+            missing_section_name=gap.display_name,
+            reasons=(f"{gap.display_name} is required for this memo and was not found.",),
+            reason_codes=("missing_required_section",),
+            required=True,
+            facility_relevant=facility_relevant,
+        )
+        grouped["must_fix"].append(item)
+
+    for section in sections:
+        canonical_id = str(section.get("canonical_section_id", ""))
+        definition = definitions.get(canonical_id)
+        applies = _definition_applies(definition, memo_type, facility_type) if definition else False
+        required = bool(definition.required and applies) if definition else False
+        facility_relevant = _is_facility_relevant(definition)
+        candidate = candidate_for_section(section, candidates)
+        confidence = float(candidate.get("confidence", 0)) if candidate else (1.0 if section.get("reviewer_confirmed") else 0.0)
+        suggested_id = str(candidate.get("suggested_section_id", "")) if candidate else canonical_id
+        suggested_name = str(candidate.get("suggested_section_name", "")) if candidate else str(section.get("canonical_section_name", ""))
+        reasons: list[str] = []
+        reason_codes: list[str] = []
+
+        if not definition:
+            reason_codes.append("no_standard_section")
+            reasons.append("No Standard Memo Section is selected for this detected section.")
+        if section.get("missing_required") and not section.get("reviewer_confirmed"):
+            reason_codes.append("missing_required_section")
+            reasons.append(f"{section.get('canonical_section_name', 'Required section')} still needs a missing-section decision.")
+        if not section.get("reviewer_confirmed") and not candidate and not section.get("missing_required"):
+            reason_codes.append("no_match")
+            reasons.append("Tag Studio did not find a reliable standard section match.")
+        if not section.get("reviewer_confirmed") and candidate and confidence < confidence_threshold:
+            reason_codes.append("low_confidence_match")
+            reasons.append(f"Suggested match confidence is {int(confidence * 100)}%, below the {int(confidence_threshold * 100)}% review threshold.")
+        if duplicate_counts.get(canonical_id, 0) > 1 and canonical_id:
+            reason_codes.append("duplicate_standard_section")
+            reasons.append(f"More than one detected section maps to {section.get('canonical_section_name', canonical_id)}.")
+        if _section_has_suspicious_boundary(section):
+            reason_codes.append("suspicious_boundary")
+            reasons.append("The section length looks unusual and may need a boundary check.")
+        has_text_warning, has_text_blocker = _section_has_text_quality_issue(section, page_quality)
+        if has_text_blocker:
+            reason_codes.append("blocking_text_quality")
+            reasons.append("One or more pages in this section still have unresolved text-quality issues.")
+        elif has_text_warning:
+            reason_codes.append("text_quality_warning")
+            reasons.append("One or more pages in this section had text-quality warnings.")
+
+        queue = _review_item_queue(reason_codes, required=required, facility_relevant=facility_relevant)
+        item = SectionReviewItem(
+            item_id=str(section.get("section_id", "")),
+            queue=queue,
+            title=str(section.get("original_header") or section.get("canonical_section_name") or "Detected section"),
+            original_heading=str(section.get("original_header") or "Unlabeled section"),
+            standard_section_id=canonical_id,
+            standard_section_name=str(section.get("canonical_section_name") or (definition.display_name if definition else "")),
+            suggested_section_id=suggested_id,
+            suggested_section_name=suggested_name,
+            confidence=confidence,
+            reasons=tuple(reasons),
+            reason_codes=tuple(reason_codes),
+            section=section,
+            section_id=str(section.get("section_id", "")),
+            required=required,
+            facility_relevant=facility_relevant,
+            page_start=int(section.get("page_start", 1)),
+            page_end=int(section.get("page_end", section.get("page_start", 1))),
+            text_preview=_section_text_preview(str(section.get("text", ""))),
+        )
+        grouped[queue].append(item)
+
+    return SectionReviewSummary(
+        must_fix=grouped["must_fix"],
+        can_review_later=grouped["can_review_later"],
+        ready=grouped["ready"],
+        confidence_threshold=confidence_threshold,
+    )
+
+
 def rebuild_sections_from_page_text(workspace: Path, memo_id: str, extraction_method: str) -> None:
     pages = load_page_text(workspace, memo_id)
     definitions = load_section_defs(workspace)
@@ -227,14 +452,12 @@ def step_summary(workspace: Path, memo_id: str | None) -> dict[str, str]:
             "Download Results": "Not Started",
         }
 
-    memo = load_memo_record(workspace, memo_id)
     sections = load_sections(workspace, memo_id)
     review = load_review(workspace, memo_id)
-    section_defs = load_section_defs(workspace)
-    gaps = required_section_gaps(sections, section_defs, memo.get("memo_type", ""), memo.get("facility_type", ""))
 
     quality_complete = text_quality_complete(workspace, memo_id)
-    sections_complete = bool(sections) and not gaps and all(section.get("reviewer_confirmed") for section in sections)
+    section_review = classify_section_review(workspace, memo_id) if sections else SectionReviewSummary([], [], [])
+    sections_complete = bool(sections) and quality_complete and not section_review.has_blockers
     facilities = load_facilities(workspace, memo_id)
     outcome_summaries = load_outcome_summaries(workspace, memo_id)
     confirmed_facilities = [facility for facility in facilities if facility.get("status") == "Confirmed" or facility.get("reviewer_confirmed")]
@@ -265,7 +488,6 @@ def tags_for_section(workspace: Path, section: dict[str, Any]) -> list[TagDefini
 
 def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str, int]]:
     findings: list[str] = []
-    memo = load_memo_record(workspace, memo_id)
     sections = load_sections(workspace, memo_id)
     section_defs = load_section_defs(workspace)
     tags = load_tags(workspace, memo_id)
@@ -332,13 +554,12 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
     if unresolved_warnings:
         findings.append(f"{len(unresolved_warnings)} extraction warning(s) still need final disposition.")
 
-    gaps = required_section_gaps(sections, section_defs, memo.get("memo_type", ""), memo.get("facility_type", ""))
-    if gaps:
-        findings.append("Missing required sections: " + ", ".join(gap.display_name for gap in gaps))
-
-    unconfirmed = [section for section in sections if not section.get("reviewer_confirmed")]
-    if unconfirmed:
-        findings.append(f"{len(unconfirmed)} section(s) still need confirmation.")
+    section_review = classify_section_review(workspace, memo_id) if sections else SectionReviewSummary([], [], [])
+    if section_review.must_fix:
+        findings.append(
+            "Section review has unresolved required item(s): "
+            + "; ".join(item.title for item in section_review.must_fix[:6])
+        )
 
     confirmed_facilities = [facility for facility in facilities if facility.get("status") == "Confirmed" or facility.get("reviewer_confirmed")]
     if not confirmed_facilities:
@@ -417,7 +638,11 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
         findings.append("No credit tags have been saved yet.")
 
     section_ids_with_tags = {tag.get("section_id") for tag in tags}
-    untagged_sections = [section for section in sections if section.get("section_id") not in section_ids_with_tags]
+    untagged_sections = [
+        section
+        for section in sections
+        if not section.get("missing_required") and section.get("section_id") not in section_ids_with_tags
+    ]
     if untagged_sections:
         findings.append(f"{len(untagged_sections)} confirmed section(s) do not have saved tags.")
 
@@ -431,7 +656,7 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
     section_defs_by_key = {definition.section_id: definition for definition in section_defs}
     missing_required_tags: list[str] = []
     for section in sections:
-        if not section.get("reviewer_confirmed"):
+        if section.get("missing_required"):
             continue
         definition = section_defs_by_key.get(section.get("canonical_section_id"))
         if not definition:

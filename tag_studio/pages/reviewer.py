@@ -22,7 +22,6 @@ from tag_studio.document_intelligence import (
     load_extraction_warnings,
     load_page_quality,
     load_page_text,
-    load_section_candidates,
     run_document_intelligence,
     save_extraction_warnings,
     save_page_quality,
@@ -43,7 +42,7 @@ from tag_studio.models import (
 )
 from tag_studio.sectioning import propose_sections, required_section_gaps
 from tag_studio.services import (
-    candidate_for_section,
+    classify_section_review,
     derive_primary_outcome,
     load_section_defs,
     memo_display_name,
@@ -535,8 +534,296 @@ def _save_boundary_merge(workspace: Path, memo_id: str, section_id: str, directi
     append_audit(workspace, memo_id, "section_merged", {"section_id": section_id, "direction": direction})
 
 
+def _next_section_id(sections: list[dict[str, Any]]) -> str:
+    existing = {str(section.get("section_id", "")) for section in sections}
+    index = len(sections) + 1
+    while f"section_{index:03}" in existing:
+        index += 1
+    return f"section_{index:03}"
+
+
+def _remember_heading_alias(workspace: Path, canonical_id: str, heading: str) -> None:
+    if not canonical_id or not heading or heading == "Not found in memo":
+        return
+    section_defs = load_section_defs(workspace)
+    updated_defs = []
+    for definition in section_defs:
+        aliases = list(definition.aliases)
+        if definition.section_id == canonical_id and heading not in aliases:
+            aliases.append(heading)
+        updated_defs.append(definition.model_copy(update={"aliases": aliases}))
+    save_section_defs(workspace, updated_defs)
+
+
+def _save_section_mapping(
+    workspace: Path,
+    memo_id: str,
+    section_id: str,
+    canonical_id: str,
+    canonical_name: str,
+    *,
+    remember_alias: bool = False,
+) -> None:
+    sections = load_sections(workspace, memo_id)
+    updated = []
+    original_heading = ""
+    for section in sections:
+        if section.get("section_id") == section_id:
+            original_heading = str(section.get("original_header", ""))
+            section = {
+                **section,
+                "canonical_section_id": canonical_id,
+                "canonical_section_name": canonical_name,
+                "reviewer_confirmed": True,
+                "missing_required": False,
+            }
+        updated.append(section)
+    save_sections(workspace, memo_id, updated)
+    if remember_alias:
+        _remember_heading_alias(workspace, canonical_id, original_heading)
+    append_audit(workspace, memo_id, "section_exception_resolved", {"section_id": section_id, "canonical_section_id": canonical_id})
+
+
+def _save_missing_section_not_addressed(workspace: Path, memo_id: str, canonical_id: str, canonical_name: str) -> None:
+    memo = load_memo_record(workspace, memo_id)
+    sections = load_sections(workspace, memo_id)
+    sections.append(
+        {
+            "section_id": _next_section_id(sections),
+            "memo_id": memo_id,
+            "canonical_section_id": canonical_id,
+            "canonical_section_name": canonical_name,
+            "original_header": "Not found in memo",
+            "page_start": 1,
+            "page_end": 1,
+            "text": "Not addressed in memo.",
+            "extraction_method": memo.get("extraction_method", "manual_correction"),
+            "reviewer_confirmed": True,
+            "missing_required": True,
+        }
+    )
+    save_sections(workspace, memo_id, sections)
+    append_audit(workspace, memo_id, "missing_section_marked_not_addressed", {"canonical_section_id": canonical_id})
+
+
+def _save_manual_section(
+    workspace: Path,
+    memo_id: str,
+    canonical_id: str,
+    canonical_name: str,
+    original_heading: str,
+    page_start: int,
+    page_end: int,
+    text: str,
+    reason: str,
+) -> None:
+    memo = load_memo_record(workspace, memo_id)
+    sections = load_sections(workspace, memo_id)
+    sections.append(
+        {
+            "section_id": _next_section_id(sections),
+            "memo_id": memo_id,
+            "canonical_section_id": canonical_id,
+            "canonical_section_name": canonical_name,
+            "original_header": original_heading or canonical_name,
+            "page_start": page_start,
+            "page_end": page_end,
+            "line_start": 1,
+            "line_end": max(1, len(text.splitlines())),
+            "text": text,
+            "extraction_method": memo.get("extraction_method", "manual_correction"),
+            "reviewer_confirmed": True,
+            "missing_required": False,
+            "manual_section_reason": reason,
+        }
+    )
+    save_sections(workspace, memo_id, sections)
+    append_audit(workspace, memo_id, "manual_section_added", {"canonical_section_id": canonical_id, "reason": reason})
+
+
+def _render_status_count(label: str, value: int, tone: str) -> None:
+    color = {"hard": "#9b1c1c", "review": "#7a4c00", "ready": "#176b3a"}.get(tone, "#172333")
+    st.markdown(
+        f'<div class="metric-card"><div class="label">{escape(label)}</div>'
+        f'<div class="value" style="color:{color}">{value}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _render_section_item_header(item) -> None:
+    confidence = f"{int(item.confidence * 100)}%" if item.confidence else "Not available"
+    page_range = f"Pages {item.page_start} to {item.page_end}" if item.page_start and item.page_end else "Page not available"
+    st.markdown(f"##### {item.title}")
+    st.caption(f"{page_range} | Match confidence: {confidence}")
+    if item.standard_section_name:
+        st.write(f"**Current standard section:** {item.standard_section_name}")
+    if item.suggested_section_name:
+        st.write(f"**Suggested standard section:** {item.suggested_section_name}")
+    for reason in item.reasons:
+        st.write(f"- {reason}")
+    if item.text_preview:
+        st.markdown("**Section text preview**")
+        st.write(item.text_preview)
+
+
+def _render_boundary_tools(workspace: Path, memo_id: str, item) -> None:
+    if not item.section_id:
+        return
+    with st.expander("Fix Boundary"):
+        text_lines = str((item.section or {}).get("text", "")).splitlines()
+        if len(text_lines) > 2:
+            split_line = st.number_input(
+                "Split before line",
+                min_value=2,
+                max_value=max(2, len(text_lines) - 1),
+                value=2,
+                step=1,
+                key=f"split_line_{memo_id}_{item.section_id}",
+            )
+            if st.button("Split Section", key=f"split_button_{memo_id}_{item.section_id}"):
+                _save_boundary_split(workspace, memo_id, item.section_id, int(split_line))
+                st.rerun()
+        else:
+            st.caption("This section is too short to split.")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Merge With Previous", key=f"merge_prev_{memo_id}_{item.section_id}"):
+                _save_boundary_merge(workspace, memo_id, item.section_id, "previous")
+                st.rerun()
+        with col2:
+            if st.button("Merge With Next", key=f"merge_next_{memo_id}_{item.section_id}"):
+                _save_boundary_merge(workspace, memo_id, item.section_id, "next")
+                st.rerun()
+
+
+def _render_section_exception_card(workspace: Path, memo_id: str, item, definitions: dict[str, Any], sections: list[dict[str, Any]]) -> None:
+    st.markdown('<div class="review-card">', unsafe_allow_html=True)
+    _render_section_item_header(item)
+    section_options = list(definitions.keys())
+    if (
+        item.section_id
+        and item.suggested_section_id
+        and "low_confidence_match" in item.reason_codes
+        and st.button("Accept Suggestion", type="primary", key=f"accept_{memo_id}_{item.section_id}")
+    ):
+        _save_section_mapping(
+            workspace,
+            memo_id,
+            item.section_id,
+            item.suggested_section_id,
+            definitions[item.suggested_section_id].display_name,
+            remember_alias=True,
+        )
+        st.rerun()
+
+    if item.section_id:
+        with st.expander("Change Standard Section"):
+            current_id = item.standard_section_id if item.standard_section_id in definitions else section_options[0]
+            selected_id = st.selectbox(
+                "Standard Memo Section",
+                section_options,
+                index=section_options.index(current_id),
+                format_func=lambda value: definitions[value].display_name,
+                key=f"change_standard_{memo_id}_{item.section_id}",
+            )
+            remember_alias = st.checkbox(
+                "Remember this heading as an alias",
+                value="low_confidence_match" in item.reason_codes,
+                key=f"change_alias_{memo_id}_{item.section_id}",
+            )
+            if st.button("Save This Section", key=f"save_mapping_{memo_id}_{item.section_id}"):
+                _save_section_mapping(
+                    workspace,
+                    memo_id,
+                    item.section_id,
+                    selected_id,
+                    definitions[selected_id].display_name,
+                    remember_alias=remember_alias,
+                )
+                st.rerun()
+        if item.required and st.button("Mark Not Addressed", key=f"not_addressed_existing_{memo_id}_{item.section_id}"):
+            _save_section_mapping(
+                workspace,
+                memo_id,
+                item.section_id,
+                item.standard_section_id,
+                item.standard_section_name,
+            )
+            updated_sections = []
+            for section in load_sections(workspace, memo_id):
+                if section.get("section_id") == item.section_id:
+                    section = {**section, "missing_required": True, "text": "Not addressed in memo.", "reviewer_confirmed": True}
+                updated_sections.append(section)
+            save_sections(workspace, memo_id, updated_sections)
+            st.rerun()
+        _render_boundary_tools(workspace, memo_id, item)
+
+    if item.missing_section_id:
+        with st.expander("Find It In Memo"):
+            detected_sections = [section for section in sections if not section.get("missing_required")]
+            if detected_sections:
+                labels = {
+                    section["section_id"]: f"{section.get('original_header')} - p.{section.get('page_start')}-{section.get('page_end')}"
+                    for section in detected_sections
+                }
+                selected_section_id = st.selectbox(
+                    "Detected section",
+                    list(labels),
+                    format_func=lambda value: labels[value],
+                    key=f"map_missing_{memo_id}_{item.missing_section_id}",
+                )
+                remember_alias = st.checkbox(
+                    "Remember this heading as an alias",
+                    value=True,
+                    key=f"map_missing_alias_{memo_id}_{item.missing_section_id}",
+                )
+                if st.button("Map Selected Section", key=f"map_missing_save_{memo_id}_{item.missing_section_id}"):
+                    _save_section_mapping(
+                        workspace,
+                        memo_id,
+                        selected_section_id,
+                        item.missing_section_id,
+                        item.missing_section_name,
+                        remember_alias=remember_alias,
+                    )
+                    st.rerun()
+            else:
+                st.caption("No detected sections are available to map.")
+        if st.button("Mark Not Addressed", key=f"missing_not_addressed_{memo_id}_{item.missing_section_id}"):
+            _save_missing_section_not_addressed(workspace, memo_id, item.missing_section_id, item.missing_section_name)
+            st.rerun()
+        with st.expander("Add Manual Section"):
+            with st.form(f"manual_section_{memo_id}_{item.missing_section_id}"):
+                original_heading = st.text_input("Original memo heading", value=item.missing_section_name)
+                page_col1, page_col2 = st.columns(2)
+                with page_col1:
+                    page_start = st.number_input("Page start", min_value=1, value=1, step=1)
+                with page_col2:
+                    page_end = st.number_input("Page end", min_value=1, value=1, step=1)
+                reason = st.selectbox("Reason", ["OCR missed text", "Header not detected", "Scanned image issue", "Other"])
+                manual_text = st.text_area("Section text", height=160)
+                submitted = st.form_submit_button("Save Manual Section")
+            if submitted:
+                if not manual_text.strip():
+                    st.error("Add section text before saving a manual section.")
+                else:
+                    _save_manual_section(
+                        workspace,
+                        memo_id,
+                        item.missing_section_id,
+                        item.missing_section_name,
+                        original_heading,
+                        int(page_start),
+                        int(page_end),
+                        manual_text,
+                        reason,
+                    )
+                    st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
-    st.subheader("Confirm Sections")
+    st.subheader("Review Section Exceptions")
     if not memo_id:
         blocked_step("Add a memo before confirming sections.", "Add Memo")
         return
@@ -557,128 +844,55 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
 
     section_defs = load_section_defs(workspace)
     definitions = {section.section_id: section for section in section_defs}
-    section_options = list(definitions.keys())
-    candidates = load_section_candidates(workspace, memo_id)
 
     if not text_quality_complete(workspace, memo_id):
         blocked_step("Review the memo text quality before confirming sections.", "Review Text Quality")
         return
 
-    add_missing_required_sections(workspace, memo_id)
+    summary = classify_section_review(workspace, memo_id)
+    count_cols = st.columns(3)
+    with count_cols[0]:
+        _render_status_count("Must Fix", len(summary.must_fix), "hard")
+    with count_cols[1]:
+        _render_status_count("Can Review Later", len(summary.can_review_later), "review")
+    with count_cols[2]:
+        _render_status_count("Ready", len(summary.ready), "ready")
 
-    st.markdown("##### Section Boundary Tools")
-    boundary_labels = {section["section_id"]: f"{section.get('canonical_section_name')} - {section.get('original_header')}" for section in sections}
-    boundary_section_id = st.selectbox("Section to split or merge", list(boundary_labels), format_func=lambda value: boundary_labels[value])
-    selected_boundary = next(section for section in sections if section["section_id"] == boundary_section_id)
-    max_split_line = max(2, len(str(selected_boundary.get("text", "")).splitlines()) - 1)
-    bcol1, bcol2, bcol3 = st.columns(3)
-    with bcol1:
-        split_line = st.number_input("Split before line", min_value=2, max_value=max_split_line, value=2, step=1)
-        if st.button("Split Section"):
-            _save_boundary_split(workspace, memo_id, boundary_section_id, int(split_line))
-            st.rerun()
-    with bcol2:
-        if st.button("Merge With Previous"):
-            _save_boundary_merge(workspace, memo_id, boundary_section_id, "previous")
-            st.rerun()
-    with bcol3:
-        if st.button("Merge With Next"):
-            _save_boundary_merge(workspace, memo_id, boundary_section_id, "next")
-            st.rerun()
+    if summary.must_fix:
+        st.markdown("##### Must Fix Before Continuing")
+        for item in summary.must_fix:
+            _render_section_exception_card(workspace, memo_id, item, definitions, sections)
+    else:
+        st.success("All Required Sections Are Ready.")
 
-    st.markdown("##### Review Detected Sections")
-    saved_sections: list[dict[str, Any]] = []
-    remember_aliases: dict[str, list[str]] = {}
-    with st.form(f"confirm_sections_{memo_id}"):
-        for idx, section in enumerate(sections):
-            current_id = section.get("canonical_section_id")
-            if current_id not in definitions:
-                current_id = section_options[0]
-            st.markdown('<div class="review-card">', unsafe_allow_html=True)
-            st.markdown(f"**Original memo heading:** {section.get('original_header', 'Unlabeled section')}")
-            st.caption(f"Pages {section.get('page_start')} to {section.get('page_end')}")
-            candidate = candidate_for_section(section, candidates)
-            if candidate:
-                alternates = candidate.get("alternate_matches", [])
-                alt_text = ""
-                if alternates:
-                    alt_text = " Alternate: " + ", ".join(
-                        f"{item.get('section_name')} ({int(float(item.get('confidence', 0)) * 100)}%)"
-                        for item in alternates[:2]
-                    )
-                st.markdown(
-                    '<div class="section-suggestion">'
-                    f'{badge("Suggestion", "Ready")} '
-                    f'{escape(str(candidate.get("suggested_section_name", "")))} '
-                    f'({int(float(candidate.get("confidence", 0)) * 100)}% confidence)<br>'
-                    f'<span class="small-muted">{escape(str(candidate.get("reason", "")))}{escape(alt_text)}</span>'
-                    "</div>",
-                    unsafe_allow_html=True,
-                )
-            col1, col2 = st.columns([1.2, 1])
-            with col1:
-                canonical_id = st.selectbox(
-                    "Standard Memo Section",
-                    section_options,
-                    index=section_options.index(current_id),
-                    format_func=lambda value: definitions[value].display_name,
-                    key=f"confirm_standard_{memo_id}_{section.get('section_id')}_{idx}",
-                    help="Choose the standard section name that best matches the memo heading, even if the memo uses different wording.",
-                )
-            with col2:
-                status = st.radio(
-                    "Section status",
-                    ["Confirmed", "Needs more review", "Missing from memo"],
-                    index=2 if section.get("missing_required") else (0 if section.get("reviewer_confirmed") else 1),
-                    horizontal=True,
-                    key=f"confirm_status_{memo_id}_{section.get('section_id')}_{idx}",
-                    help="Confirm the section when the text and standard section are correct. Use missing only when the memo does not address a required topic.",
-                )
-            remember = st.checkbox(
-                "Remember this heading next time",
-                value=False,
-                key=f"remember_alias_{memo_id}_{section.get('section_id')}_{idx}",
-                help="Save this memo's heading as an accepted name for the selected standard section in future memos.",
+    if summary.can_review_later:
+        st.markdown("##### Can Review Later")
+        st.caption("These warnings remain visible, but they do not block facility setup.")
+        for item in summary.can_review_later:
+            _render_section_exception_card(workspace, memo_id, item, definitions, sections)
+
+    with st.expander(f"Ready Sections ({len(summary.ready)})", expanded=False):
+        if not summary.ready:
+            st.caption("No ready sections yet.")
+        for item in summary.ready:
+            confidence = f"{int(item.confidence * 100)}%" if item.confidence else "Not available"
+            st.markdown(
+                f"**{escape(item.standard_section_name or item.suggested_section_name)}**  \n"
+                f"<span class='small-muted'>{escape(item.original_heading)} | "
+                f"Pages {item.page_start}-{item.page_end} | {confidence}</span>",
+                unsafe_allow_html=True,
             )
-            text = st.text_area(
-                "Section text",
-                value=section.get("text", ""),
-                height=135,
-                key=f"confirm_text_{memo_id}_{section.get('section_id')}_{idx}",
-                disabled=True,
-                help="Text corrections happen in Review Text Quality. Use split/merge controls here to adjust section boundaries.",
-            )
-            st.markdown("</div>", unsafe_allow_html=True)
-            saved_sections.append(
-                {
-                    **section,
-                    "canonical_section_id": canonical_id,
-                    "canonical_section_name": definitions[canonical_id].display_name,
-                    "reviewer_confirmed": status in {"Confirmed", "Missing from memo"},
-                    "missing_required": status == "Missing from memo",
-                    "text": text or ("Not addressed in memo." if status == "Missing from memo" else ""),
-                }
-            )
-            if remember and section.get("original_header") and section.get("original_header") != "Not found in memo":
-                remember_aliases.setdefault(canonical_id, []).append(str(section["original_header"]))
+            if item.text_preview:
+                with st.expander(f"Preview: {item.original_heading}", expanded=False):
+                    st.write(item.text_preview)
 
-        submitted = st.form_submit_button("Save Section Review", type="primary")
-
-    if submitted:
-        if remember_aliases:
-            updated_defs = []
-            for definition in section_defs:
-                aliases = list(definition.aliases)
-                for alias in remember_aliases.get(definition.section_id, []):
-                    if alias not in aliases:
-                        aliases.append(alias)
-                updated_defs.append(definition.model_copy(update={"aliases": aliases}))
-            save_section_defs(workspace, updated_defs)
-        save_sections(workspace, memo_id, saved_sections)
-        if all(section.get("reviewer_confirmed") for section in saved_sections):
-            st.session_state["selected_step"] = "Set Up Facilities"
-            st.rerun()
-        st.success("Section review saved. Sections still needing review remain marked.")
+    st.markdown("##### Next Action")
+    if summary.must_fix:
+        st.warning(f"Resolve {len(summary.must_fix)} required item(s) before continuing.")
+        st.button("Resolve Required Items First", disabled=True)
+    elif st.button("Continue to Set Up Facilities", type="primary"):
+        st.session_state["selected_step"] = "Set Up Facilities"
+        st.rerun()
 
 
 def _display_required(label: str, required: bool) -> str:
