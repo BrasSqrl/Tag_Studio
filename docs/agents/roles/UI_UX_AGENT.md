@@ -10,7 +10,7 @@ Make Tag Studio feel like a guided credit-review workbench for nontechnical cred
 - User-facing labels, help text, errors, success messages, and README workflow language.
 - Normal reviewer flow:
   - Add Memo
-  - Confirm Sections
+  - Review Memo Sections
   - Tag Credit Review
   - Quality Check
   - Download Results
@@ -42,4 +42,3 @@ Make Tag Studio feel like a guided credit-review workbench for nontechnical cred
 
 - [Streamlit Wizard UX](../skills/STREAMLIT_WIZARD_UX.md)
 - [Credit Tagging Domain](../skills/CREDIT_TAGGING_DOMAIN.md)
-

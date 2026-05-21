@@ -12,6 +12,7 @@ from tag_studio.extraction import tesseract_available
 from tag_studio.models import SectionDefinition, TagDefinition
 from tag_studio.schema_workbook import create_tag_setup_workbook, import_tag_setup_workbook
 from tag_studio.services import (
+    load_learned_heading_matches,
     load_outcome_taxonomy,
     load_scoring_rubric,
     load_section_defs,
@@ -22,7 +23,7 @@ from tag_studio.services import (
     save_tag_defs,
     schema_usage_warnings,
 )
-from tag_studio.storage import config_path, list_memo_ids, slugify, storage_status
+from tag_studio.storage import config_path, list_memo_ids, slugify, storage_status, write_json
 
 
 def schema_page(workspace: Path) -> None:
@@ -122,6 +123,22 @@ def schema_page(workspace: Path) -> None:
         ["Standard Memo Sections", "Credit Tags", "Outcome Event Types", "Scoring Rules"]
     )
     with tab_sections:
+        learned_headings = load_learned_heading_matches(workspace)
+        with st.expander("Learned Heading Matches"):
+            st.caption("Reviewer section corrections saved for future heading matching. These do not change the formal section setup.")
+            rows_learned = [
+                {"section_id": section_id, "learned_heading": heading}
+                for section_id, headings in learned_headings.items()
+                for heading in headings
+            ]
+            if rows_learned:
+                st.dataframe(pd.DataFrame(rows_learned), width="stretch", hide_index=True)
+                if st.button("Clear Learned Heading Matches"):
+                    write_json(config_path(workspace, "learned_heading_matches.json"), {})
+                    st.success("Learned heading matches cleared.")
+                    st.rerun()
+            else:
+                st.info("No learned heading matches have been saved yet.")
         rows = [
             {
                 "section_id": definition.section_id,

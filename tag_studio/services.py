@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -9,13 +9,13 @@ from uuid import uuid4
 from .app_config import STATUS_LABELS
 from .defaults import DEFAULT_OUTCOME_EVENT_TYPES, SCHEMA_VERSION
 from .document_intelligence import load_extraction_warnings, load_page_quality, load_page_text, load_section_candidates
-from .models import MemoLockRecord, SectionDefinition, TagDefinition
+from .models import SectionDefinition, TagDefinition
 from .sectioning import propose_section_candidates, propose_sections, required_section_gaps
 from .storage import (
     active_schema_hash,
+    append_audit,
     config_path,
     list_memo_ids,
-    load_active_lock,
     load_evidence,
     load_facilities,
     load_foreseeability_assessments,
@@ -29,11 +29,12 @@ from .storage import (
     load_tags,
     memo_dir,
     read_json,
-    save_active_lock,
     save_review,
     save_sections,
     write_json,
 )
+
+LEARNED_HEADINGS_FILE = "learned_heading_matches.json"
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,16 @@ class SectionReviewSummary:
         return bool(self.must_fix)
 
 
+@dataclass(frozen=True)
+class SectionCleanupBlock:
+    block_id: str
+    label: str
+    text: str
+    page_start: int
+    page_end: int
+    ordinal: int
+
+
 def load_section_defs(workspace: Path) -> list[SectionDefinition]:
     return [SectionDefinition(**row) for row in read_json(config_path(workspace, "section_schema.json"), [])]
 
@@ -161,6 +172,169 @@ def record_schema_change(workspace: Path, reason: str) -> None:
 
 def section_defs_by_id(workspace: Path) -> dict[str, SectionDefinition]:
     return {section.section_id: section for section in load_section_defs(workspace)}
+
+
+def load_learned_heading_matches(workspace: Path) -> dict[str, list[str]]:
+    raw = read_json(config_path(workspace, LEARNED_HEADINGS_FILE), {})
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: dict[str, list[str]] = {}
+    for section_id, headings in raw.items():
+        if not isinstance(headings, list):
+            continue
+        values = [str(heading).strip() for heading in headings if str(heading).strip()]
+        if values:
+            cleaned[str(section_id)] = sorted(set(values), key=str.casefold)
+    return cleaned
+
+
+def save_learned_heading_match(workspace: Path, section_id: str, heading: str) -> None:
+    heading = " ".join(str(heading or "").split())
+    if not section_id or not heading or heading == "Not found in memo":
+        return
+    learned = load_learned_heading_matches(workspace)
+    headings = set(learned.get(section_id, []))
+    headings.add(heading)
+    learned[section_id] = sorted(headings, key=str.casefold)
+    write_json(config_path(workspace, LEARNED_HEADINGS_FILE), learned)
+
+
+def section_cleanup_blocks(section: dict[str, Any]) -> list[SectionCleanupBlock]:
+    text = str(section.get("text", "") or "")
+    raw_blocks = [block.strip() for block in text.split("\n\n") if block.strip()]
+    if len(raw_blocks) <= 1:
+        raw_blocks = [line.strip() for line in text.splitlines() if line.strip()]
+    if not raw_blocks and text.strip():
+        raw_blocks = [text.strip()]
+    page_start = int(section.get("page_start", 1) or 1)
+    page_end = int(section.get("page_end", page_start) or page_start)
+    section_id = str(section.get("section_id", "section"))
+    return [
+        SectionCleanupBlock(
+            block_id=f"{section_id}_block_{index:03}",
+            label=f"Text block {index}",
+            text=block,
+            page_start=page_start,
+            page_end=page_end,
+            ordinal=index,
+        )
+        for index, block in enumerate(raw_blocks, start=1)
+    ]
+
+
+def _cleanup_history_path(workspace: Path, memo_id: str) -> Path:
+    return memo_dir(workspace, memo_id) / "sections" / "section_cleanup_history.json"
+
+
+def _push_cleanup_snapshot(workspace: Path, memo_id: str, sections: list[dict[str, Any]], action: str) -> None:
+    path = _cleanup_history_path(workspace, memo_id)
+    history = read_json(path, [])
+    if not isinstance(history, list):
+        history = []
+    history.append({"created_at": datetime.now(UTC).isoformat(), "action": action, "sections": sections})
+    write_json(path, history[-20:])
+
+
+def undo_last_section_cleanup(workspace: Path, memo_id: str) -> bool:
+    path = _cleanup_history_path(workspace, memo_id)
+    history = read_json(path, [])
+    if not history:
+        return False
+    last = history.pop()
+    sections = last.get("sections", [])
+    if not isinstance(sections, list):
+        return False
+    save_sections(workspace, memo_id, sections)
+    write_json(path, history)
+    append_audit(workspace, memo_id, "section_cleanup_undone", {"restored_at": datetime.now(UTC).isoformat()})
+    return True
+
+
+def _join_cleanup_text(parts: list[str]) -> str:
+    return "\n\n".join(part.strip() for part in parts if part.strip()).strip()
+
+
+def apply_section_cleanup(
+    workspace: Path,
+    memo_id: str,
+    section_id: str,
+    block_actions: dict[str, dict[str, str]],
+    definitions: dict[str, SectionDefinition],
+) -> None:
+    sections = load_sections(workspace, memo_id)
+    section_index = next((idx for idx, section in enumerate(sections) if section.get("section_id") == section_id), -1)
+    if section_index < 0:
+        return
+
+    _push_cleanup_snapshot(workspace, memo_id, sections, "clean_up_section_text")
+    current = sections[section_index]
+    blocks = section_cleanup_blocks(current)
+    current_text: list[str] = []
+    additions_by_section: dict[str, list[str]] = {}
+    new_sections: list[dict[str, Any]] = []
+    previous_section_id = str(sections[section_index - 1].get("section_id", "")) if section_index > 0 else ""
+
+    for block in blocks:
+        action = block_actions.get(block.block_id, {}).get("action", "Keep Here")
+        text = block.text.strip()
+        if not text:
+            continue
+        if action == "Move to Another Section":
+            target_section_id = block_actions.get(block.block_id, {}).get("target_section_id", "")
+            if target_section_id and target_section_id != section_id:
+                additions_by_section.setdefault(target_section_id, []).append(text)
+            else:
+                current_text.append(text)
+        elif action == "Start New Section Here":
+            standard_id = block_actions.get(block.block_id, {}).get("new_standard_section_id", current.get("canonical_section_id", ""))
+            definition = definitions.get(standard_id)
+            new_sections.append(
+                {
+                    **current,
+                    "section_id": f"section_{uuid4().hex[:10]}",
+                    "canonical_section_id": standard_id,
+                    "canonical_section_name": definition.display_name if definition else str(current.get("canonical_section_name", "")),
+                    "original_header": definition.display_name if definition else "New section from selected text",
+                    "text": text,
+                    "line_start": 1,
+                    "line_end": max(1, len(text.splitlines())),
+                    "reviewer_confirmed": True,
+                    "missing_required": False,
+                    "section_cleanup_note": "Created from selected text during reviewer cleanup.",
+                }
+            )
+        elif action == "Add to Previous Section" and previous_section_id:
+            additions_by_section.setdefault(previous_section_id, []).append(text)
+        elif action == "Mark as Duplicate":
+            continue
+        else:
+            current_text.append(text)
+
+    updated_sections: list[dict[str, Any]] = []
+    for idx, section in enumerate(sections):
+        updated = dict(section)
+        if section.get("section_id") == section_id:
+            updated["text"] = _join_cleanup_text(current_text)
+            updated["line_start"] = 1
+            updated["line_end"] = max(1, len(updated["text"].splitlines()))
+            updated["reviewer_confirmed"] = True
+            updated["section_cleanup_note"] = "Reviewer cleaned up this section text."
+        if section.get("section_id") in additions_by_section:
+            updated["text"] = _join_cleanup_text([str(updated.get("text", "")), *additions_by_section[str(section.get("section_id"))]])
+            updated["line_end"] = max(1, len(updated["text"].splitlines()))
+            updated["reviewer_confirmed"] = True
+            updated["section_cleanup_note"] = "Reviewer added text from another section."
+        updated_sections.append(updated)
+        if idx == section_index:
+            updated_sections.extend(new_sections)
+
+    save_sections(workspace, memo_id, updated_sections)
+    append_audit(
+        workspace,
+        memo_id,
+        "section_text_cleaned_up",
+        {"section_id": section_id, "block_count": len(blocks), "new_section_count": len(new_sections)},
+    )
 
 
 def load_memo_bundle(workspace: Path, memo_id: str) -> MemoBundle:
@@ -428,14 +602,16 @@ def classify_section_review(
 def rebuild_sections_from_page_text(workspace: Path, memo_id: str, extraction_method: str) -> None:
     pages = load_page_text(workspace, memo_id)
     definitions = load_section_defs(workspace)
+    learned_headings = load_learned_heading_matches(workspace)
     proposed = propose_sections(
         memo_id=memo_id,
         pages=pages,
         definitions=definitions,
         extraction_method=extraction_method,
+        learned_headings=learned_headings,
     )
     save_sections(workspace, memo_id, [section.model_dump() for section in proposed])
-    candidates = propose_section_candidates(memo_id, pages, definitions)
+    candidates = propose_section_candidates(memo_id, pages, definitions, learned_headings=learned_headings)
     write_json(memo_dir(workspace, memo_id) / "sections" / "section_candidates.json", [candidate.model_dump() for candidate in candidates])
 
 
@@ -444,7 +620,7 @@ def step_summary(workspace: Path, memo_id: str | None) -> dict[str, str]:
         return {
             "Add Memo": "Needs Review",
             "Review Text Quality": "Not Started",
-            "Confirm Sections": "Not Started",
+            "Review Memo Sections": "Not Started",
             "Set Up Facilities": "Not Started",
             "Tag Credit Review": "Not Started",
             "Tag Outcomes": "Not Started",
@@ -468,7 +644,7 @@ def step_summary(workspace: Path, memo_id: str | None) -> dict[str, str]:
     return {
         "Add Memo": "Complete",
         "Review Text Quality": "Complete" if quality_complete else "Needs Review",
-        "Confirm Sections": "Complete" if sections_complete else ("Needs Review" if quality_complete else "Not Started"),
+        "Review Memo Sections": "Complete" if sections_complete else ("Needs Review" if quality_complete else "Not Started"),
         "Set Up Facilities": "Complete" if confirmed_facilities else ("Needs Review" if sections_complete else "Not Started"),
         "Tag Credit Review": "Complete" if tags_complete else ("Needs Review" if confirmed_facilities else "Not Started"),
         "Tag Outcomes": "Complete" if outcome_summaries else ("Needs Review" if confirmed_facilities else "Not Started"),
@@ -700,44 +876,6 @@ def quality_findings(workspace: Path, memo_id: str) -> tuple[list[str], dict[str
         "foreseeability_total": len(foreseeability_assessments),
     }
     return findings, metrics
-
-
-def _parse_dt(value: str) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
-
-
-def acquire_or_refresh_lock(
-    workspace: Path,
-    memo_id: str,
-    *,
-    session_id: str,
-    owner_name: str,
-    current_step: str,
-    ttl_minutes: int = 30,
-) -> tuple[bool, str, dict[str, Any]]:
-    now = datetime.now(UTC)
-    existing = load_active_lock(workspace, memo_id)
-    expires_at = _parse_dt(str(existing.get("expires_at", ""))) if existing else None
-    if existing and existing.get("owner_session_id") != session_id and expires_at and expires_at > now:
-        return False, f"This memo is currently being reviewed by {existing.get('owner_name') or 'another user'}.", existing
-
-    lock = MemoLockRecord(
-        memo_id=memo_id,
-        lock_id=str(existing.get("lock_id") or f"lock_{uuid4().hex[:10]}"),
-        owner_session_id=session_id,
-        owner_name=owner_name,
-        current_step=current_step,
-        acquired_at=str(existing.get("acquired_at") or now.isoformat()),
-        heartbeat_at=now.isoformat(),
-        expires_at=(now + timedelta(minutes=ttl_minutes)).isoformat(),
-    )
-    save_active_lock(workspace, memo_id, lock)
-    return True, "Memo lock active.", lock.model_dump()
 
 
 def schema_usage_warnings(

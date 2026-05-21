@@ -175,13 +175,19 @@ def run_document_intelligence(
     memo_id: str,
     definitions: list[Any],
     force_ocr: bool = False,
+    learned_headings: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     base = memo_dir(workspace, memo_id)
     pages, rendered_paths, method, warning = extract_pdf(base / "source" / "source.pdf", base / "pages", force_ocr=force_ocr)
     sync_path_to_remote(workspace, base / "pages")
     page_quality = build_page_quality(memo_id, pages, rendered_paths, method)
     layout_blocks = build_layout_blocks(memo_id, pages)
-    section_candidates = propose_section_candidates(memo_id, [page.model_dump() for page in pages], definitions)
+    section_candidates = propose_section_candidates(
+        memo_id,
+        [page.model_dump() for page in pages],
+        definitions,
+        learned_headings=learned_headings,
+    )
     warnings = build_warnings(memo_id, page_quality, warning)
 
     reading_order = [

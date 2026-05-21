@@ -4,7 +4,7 @@ Use this skill when changing the reviewer-facing Streamlit workflow.
 
 ## Procedure
 
-1. Identify the user step being changed: Add Memo, Confirm Sections, Tag Credit Review, Quality Check, or Download Results.
+1. Identify the user step being changed: Add Memo, Review Memo Sections, Tag Credit Review, Quality Check, or Download Results.
 2. Keep the normal workflow linear and plain-language.
 3. Hide implementation details unless the user is in Admin Tools.
 4. Make the next action obvious with one primary button per screen section.
@@ -23,4 +23,3 @@ Use this skill when changing the reviewer-facing Streamlit workflow.
 - `python -m compileall tag_studio`
 - Browser smoke check at `http://localhost:8501`
 - Confirm no raw HTML, old labels, or technical workflow names appear in the normal flow.
-

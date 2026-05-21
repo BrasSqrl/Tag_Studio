@@ -9,6 +9,7 @@ CSS = """
 body { background: #f6f8fb; }
 .block-container { padding-top: 1.4rem; max-width: 1380px; }
 [data-testid="stSidebar"] { background: #102033; }
+[data-testid="stSidebarNav"] { display: none !important; }
 [data-testid="stSidebar"] label, [data-testid="stSidebar"] p, [data-testid="stSidebar"] span {
   color: #edf4ff !important;
 }
@@ -138,6 +139,7 @@ def show_progress(current_step: str, statuses: dict[str, str]) -> None:
 
 
 def go_to_step(step: str) -> None:
+    st.session_state["_pending_review_step"] = step
     st.session_state["selected_step"] = step
     st.rerun()
 

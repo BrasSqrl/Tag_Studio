@@ -12,7 +12,7 @@ from uuid import uuid4
 from filelock import FileLock
 
 from .defaults import DEFAULT_OUTCOME_TAXONOMY, DEFAULT_SCORING_RUBRIC, DEFAULT_SECTIONS, DEFAULT_TAGS, SCHEMA_VERSION
-from .models import MemoLockRecord, MemoRecord, ReviewRecord, utc_now
+from .models import MemoRecord, ReviewRecord, utc_now
 
 DEFAULT_WORKSPACE = Path(os.getenv("TAG_STUDIO_LOCAL_WORKSPACE", "tag_studio_workspace"))
 S3_INDEX_RELATIVE_PATH = "memos/index.json"
@@ -587,20 +587,6 @@ def load_audit_events(workspace: Path, memo_id: str) -> list[dict[str, Any]]:
         return []
     events = [read_json(path, {}) for path in sorted(events_dir.glob("*.json"))]
     return [event for event in events if event]
-
-
-def load_active_lock(workspace: Path, memo_id: str) -> dict[str, Any]:
-    return read_json(memo_dir(workspace, memo_id) / "review" / "active_lock.json", {})
-
-
-def save_active_lock(workspace: Path, memo_id: str, lock: MemoLockRecord) -> None:
-    write_json(memo_dir(workspace, memo_id) / "review" / "active_lock.json", lock.model_dump())
-
-
-def clear_active_lock(workspace: Path, memo_id: str) -> None:
-    path = memo_dir(workspace, memo_id) / "review" / "active_lock.json"
-    write_json(path, {})
-    append_audit(workspace, memo_id, "memo_lock_cleared", {})
 
 
 def reset_demo_workspace(workspace: Path) -> None:

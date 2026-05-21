@@ -100,7 +100,7 @@ def test_high_confidence_section_is_ready_without_manual_confirmation(tmp_path) 
     assert not summary.must_fix
     assert not summary.can_review_later
     assert len(summary.ready) == 1
-    assert step_summary(workspace, memo_id)["Confirm Sections"] == "Complete"
+    assert step_summary(workspace, memo_id)["Review Memo Sections"] == "Complete"
 
 
 def test_low_confidence_required_section_blocks_continuation(tmp_path) -> None:
@@ -112,7 +112,7 @@ def test_low_confidence_required_section_blocks_continuation(tmp_path) -> None:
 
     assert len(summary.must_fix) == 1
     assert "low_confidence_match" in summary.must_fix[0].reason_codes
-    assert step_summary(workspace, memo_id)["Confirm Sections"] == "Needs Review"
+    assert step_summary(workspace, memo_id)["Review Memo Sections"] == "Needs Review"
 
 
 def test_missing_required_section_blocks_continuation(tmp_path) -> None:

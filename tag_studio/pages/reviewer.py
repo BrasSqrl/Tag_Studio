@@ -40,19 +40,23 @@ from tag_studio.models import (
     TagRecord,
     utc_now,
 )
-from tag_studio.sectioning import propose_sections, required_section_gaps
+from tag_studio.sectioning import propose_sections
 from tag_studio.services import (
+    apply_section_cleanup,
     classify_section_review,
     derive_primary_outcome,
+    load_learned_heading_matches,
     load_section_defs,
     memo_display_name,
     outcome_event_severity,
     quality_findings,
     rebuild_sections_from_page_text,
-    save_section_defs,
+    save_learned_heading_match,
+    section_cleanup_blocks,
     step_summary,
     tags_for_section,
     text_quality_complete,
+    undo_last_section_cleanup,
 )
 from tag_studio.storage import (
     active_schema_hash,
@@ -87,6 +91,13 @@ from tag_studio.ui_components import badge, blocked_step, extraction_message, go
 
 MAX_UPLOAD_MB = 50
 MAX_PDF_PAGES = 250
+SCOPE_LABELS = {
+    "memo": "Whole memo",
+    "borrower": "Borrower",
+    "facility": "Facility",
+    "section": "This section",
+    "outcome": "Outcome",
+}
 
 
 def _preflight_upload(workspace: Path, file_name: str, pdf_bytes: bytes) -> tuple[bool, str]:
@@ -171,9 +182,8 @@ def add_memo_page(workspace: Path) -> None:
             help="This only selects a memo that is already in Tag Studio. It does not upload or read a new PDF.",
         )
         st.session_state["active_memo_id"] = active
-        if st.button("Continue Selected Memo", type="primary"):
-            st.session_state["selected_step"] = "Review Text Quality"
-            st.rerun()
+        if st.button("Continue Review", type="primary"):
+            go_to_step("Review Text Quality")
 
     st.divider()
     st.markdown("##### Upload a New Credit Memo")
@@ -181,7 +191,7 @@ def add_memo_page(workspace: Path) -> None:
     deps = dependency_status()
     if not deps.get("tesseract"):
         st.warning(
-            "Scanned memo setup is incomplete. Digital PDFs can still be read, but scanned PDFs may need local OCR support "
+            "Scanned memo setup is incomplete. Digital PDFs can still be read, but scanned PDFs may need local scanned-page support "
             "or manual text correction before Tag Studio can reliably read page images."
         )
     with st.form("add_memo_form"):
@@ -210,7 +220,7 @@ def add_memo_page(workspace: Path) -> None:
                 help="Pick the main facility type so Tag Studio can apply the right section and tagging expectations.",
             )
         reviewer = st.text_input("Reviewer name")
-        submitted = st.form_submit_button("Read Uploaded Memo", type="primary")
+        submitted = st.form_submit_button("Read Memo", type="primary")
 
     if not submitted:
         return
@@ -237,7 +247,9 @@ def add_memo_page(workspace: Path) -> None:
 
     with st.spinner("Reading memo text..."):
         try:
-            intelligence = run_document_intelligence(workspace, memo_id, load_section_defs(workspace))
+            section_defs = load_section_defs(workspace)
+            learned_headings = load_learned_heading_matches(workspace)
+            intelligence = run_document_intelligence(workspace, memo_id, section_defs, learned_headings=learned_headings)
         except Exception as exc:  # noqa: BLE001 - show a friendly error in the UI.
             st.error("Tag Studio could not read this PDF. Confirm the file opens normally, then try again.")
             append_audit(workspace, memo_id, "extraction_failed", {"error": str(exc)})
@@ -253,15 +265,15 @@ def add_memo_page(workspace: Path) -> None:
         proposed = propose_sections(
             memo_id=memo_id,
             pages=[page.model_dump() for page in page_text],
-            definitions=load_section_defs(workspace),
+            definitions=section_defs,
             extraction_method=method,
+            learned_headings=learned_headings,
         )
         save_sections(workspace, memo_id, [section.model_dump() for section in proposed])
 
     st.session_state["active_memo_id"] = memo_id
     extraction_message(method, warning, len(page_text))
-    st.session_state["selected_step"] = "Review Text Quality"
-    st.rerun()
+    go_to_step("Review Text Quality")
 
 
 def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
@@ -280,7 +292,9 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
         if st.button("Create Text Quality Review", type="primary"):
             with st.spinner("Reading the saved memo..."):
                 try:
-                    intelligence = run_document_intelligence(workspace, memo_id, load_section_defs(workspace))
+                    section_defs = load_section_defs(workspace)
+                    learned_headings = load_learned_heading_matches(workspace)
+                    intelligence = run_document_intelligence(workspace, memo_id, section_defs, learned_headings=learned_headings)
                 except Exception as exc:  # noqa: BLE001 - keep the reviewer-facing message plain.
                     st.error("Tag Studio could not read the saved PDF. Confirm the original PDF is still available in the memo workspace.")
                     append_audit(workspace, memo_id, "text_quality_rebuild_failed", {"error": str(exc)})
@@ -292,8 +306,9 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
                     proposed = propose_sections(
                         memo_id=memo_id,
                         pages=[page.model_dump() for page in intelligence["pages"]],
-                        definitions=load_section_defs(workspace),
+                        definitions=section_defs,
                         extraction_method=intelligence["method"],
+                        learned_headings=learned_headings,
                     )
                     save_sections(workspace, memo_id, [section.model_dump() for section in proposed])
                 append_audit(workspace, memo_id, "text_quality_rebuilt", {"method": intelligence["method"]})
@@ -383,14 +398,14 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
         disposition_options = ["Corrected", "Reviewed - acceptable", "Not material", "Unable to read", "Needs escalation"]
         current_disposition = selected_record.get("disposition", "Reviewed - acceptable" if selected_record.get("status") == "Ready" else "Unresolved")
         disposition = st.selectbox(
-            "Text quality disposition",
+            "Page review decision",
             disposition_options,
             index=disposition_options.index(current_disposition) if current_disposition in disposition_options else 1,
             key=f"quality_disposition_{memo_id}_{selected_page_number}",
             help="Every non-ready page needs a final disposition before approval.",
         )
         disposition_rationale = st.text_area(
-            "Disposition rationale",
+            "Reason for this decision",
             value=selected_record.get("disposition_rationale", ""),
             height=70,
             key=f"quality_disposition_rationale_{memo_id}_{selected_page_number}",
@@ -448,90 +463,11 @@ def review_text_quality_page(workspace: Path, memo_id: str | None) -> None:
     remaining = [record for record in load_page_quality(workspace, memo_id) if not record.get("reviewer_confirmed") and record.get("status") != "Ready"]
     st.markdown("##### Next Action")
     if remaining:
-        st.warning(f"{len(remaining)} page(s) still need review before sections are confirmed.")
+        st.warning(f"{len(remaining)} page(s) still need review before memo sections are reviewed.")
     else:
         st.success("Text quality review is complete.")
-        if st.button("Continue to Confirm Sections", type="primary"):
-            go_to_step("Confirm Sections")
-
-
-def add_missing_required_sections(workspace: Path, memo_id: str) -> None:
-    memo = load_memo_record(workspace, memo_id)
-    sections = load_sections(workspace, memo_id)
-    gaps = required_section_gaps(sections, load_section_defs(workspace), memo.get("memo_type", ""), memo.get("facility_type", ""))
-    if not gaps:
-        return
-    st.warning("These required sections were not found: " + ", ".join(gap.display_name for gap in gaps))
-    if st.button("Add Missing Section Records"):
-        for gap in gaps:
-            sections.append(
-                {
-                    "section_id": f"section_{len(sections) + 1:03}",
-                    "memo_id": memo_id,
-                    "canonical_section_id": gap.section_id,
-                    "canonical_section_name": gap.display_name,
-                    "original_header": "Not found in memo",
-                    "page_start": 1,
-                    "page_end": 1,
-                    "text": "Not addressed in memo.",
-                    "extraction_method": memo.get("extraction_method", "manual_correction"),
-                    "reviewer_confirmed": True,
-                    "missing_required": True,
-                }
-            )
-        save_sections(workspace, memo_id, sections)
-        st.success("Missing section records added.")
-        st.rerun()
-
-
-def _save_boundary_split(workspace: Path, memo_id: str, section_id: str, split_line: int) -> None:
-    sections = load_sections(workspace, memo_id)
-    updated: list[dict[str, Any]] = []
-    for section in sections:
-        if section.get("section_id") != section_id:
-            updated.append(section)
-            continue
-        lines = str(section.get("text", "")).splitlines()
-        if split_line <= 1 or split_line >= len(lines):
-            updated.append(section)
-            continue
-        first = {**section, "text": "\n".join(lines[: split_line - 1]), "line_end": int(section.get("line_start", 1)) + split_line - 2}
-        second = {
-            **section,
-            "section_id": f"section_{len(sections) + len(updated) + 1:03}",
-            "original_header": f"{section.get('original_header', 'Section')} - continued",
-            "text": "\n".join(lines[split_line - 1 :]),
-            "line_start": int(first["line_end"]) + 1,
-            "reviewer_confirmed": False,
-        }
-        updated.extend([first, second])
-    save_sections(workspace, memo_id, updated)
-    append_audit(workspace, memo_id, "section_split", {"section_id": section_id, "split_line": split_line})
-
-
-def _save_boundary_merge(workspace: Path, memo_id: str, section_id: str, direction: str) -> None:
-    sections = load_sections(workspace, memo_id)
-    index = next((idx for idx, section in enumerate(sections) if section.get("section_id") == section_id), -1)
-    merge_index = index - 1 if direction == "previous" else index + 1
-    if index < 0 or merge_index < 0 or merge_index >= len(sections):
-        return
-    keep_index = min(index, merge_index)
-    other_index = max(index, merge_index)
-    keep = sections[keep_index]
-    other = sections[other_index]
-    merged = {
-        **keep,
-        "text": f"{keep.get('text', '')}\n{other.get('text', '')}".strip(),
-        "page_start": min(int(keep.get("page_start", 1)), int(other.get("page_start", 1))),
-        "page_end": max(int(keep.get("page_end", 1)), int(other.get("page_end", 1))),
-        "line_start": min(int(keep.get("line_start", 1)), int(other.get("line_start", 1))),
-        "line_end": max(int(keep.get("line_end", 1)), int(other.get("line_end", 1))),
-        "reviewer_confirmed": False,
-    }
-    updated = [section for idx, section in enumerate(sections) if idx not in {keep_index, other_index}]
-    updated.insert(keep_index, merged)
-    save_sections(workspace, memo_id, updated)
-    append_audit(workspace, memo_id, "section_merged", {"section_id": section_id, "direction": direction})
+        if st.button("Continue to Review Memo Sections", type="primary"):
+            go_to_step("Review Memo Sections")
 
 
 def _next_section_id(sections: list[dict[str, Any]]) -> str:
@@ -542,27 +478,12 @@ def _next_section_id(sections: list[dict[str, Any]]) -> str:
     return f"section_{index:03}"
 
 
-def _remember_heading_alias(workspace: Path, canonical_id: str, heading: str) -> None:
-    if not canonical_id or not heading or heading == "Not found in memo":
-        return
-    section_defs = load_section_defs(workspace)
-    updated_defs = []
-    for definition in section_defs:
-        aliases = list(definition.aliases)
-        if definition.section_id == canonical_id and heading not in aliases:
-            aliases.append(heading)
-        updated_defs.append(definition.model_copy(update={"aliases": aliases}))
-    save_section_defs(workspace, updated_defs)
-
-
 def _save_section_mapping(
     workspace: Path,
     memo_id: str,
     section_id: str,
     canonical_id: str,
     canonical_name: str,
-    *,
-    remember_alias: bool = False,
 ) -> None:
     sections = load_sections(workspace, memo_id)
     updated = []
@@ -579,8 +500,7 @@ def _save_section_mapping(
             }
         updated.append(section)
     save_sections(workspace, memo_id, updated)
-    if remember_alias:
-        _remember_heading_alias(workspace, canonical_id, original_heading)
+    save_learned_heading_match(workspace, canonical_id, original_heading)
     append_audit(workspace, memo_id, "section_exception_resolved", {"section_id": section_id, "canonical_section_id": canonical_id})
 
 
@@ -666,34 +586,89 @@ def _render_section_item_header(item) -> None:
         st.write(item.text_preview)
 
 
-def _render_boundary_tools(workspace: Path, memo_id: str, item) -> None:
+def _render_section_cleanup_tools(
+    workspace: Path,
+    memo_id: str,
+    item,
+    definitions: dict[str, Any],
+    sections: list[dict[str, Any]],
+) -> None:
     if not item.section_id:
         return
-    with st.expander("Fix Boundary"):
-        text_lines = str((item.section or {}).get("text", "")).splitlines()
-        if len(text_lines) > 2:
-            split_line = st.number_input(
-                "Split before line",
-                min_value=2,
-                max_value=max(2, len(text_lines) - 1),
-                value=2,
-                step=1,
-                key=f"split_line_{memo_id}_{item.section_id}",
-            )
-            if st.button("Split Section", key=f"split_button_{memo_id}_{item.section_id}"):
-                _save_boundary_split(workspace, memo_id, item.section_id, int(split_line))
+    with st.expander("Clean Up Section Text"):
+        st.caption(
+            "Use this only when a paragraph was placed under the wrong memo section. "
+            "Leave the text alone if it already belongs here."
+        )
+        blocks = section_cleanup_blocks(item.section or {})
+        if not blocks:
+            st.caption("There is no section text to clean up.")
+            return
+        if st.button("Undo Last Cleanup", key=f"undo_cleanup_{memo_id}_{item.section_id}"):
+            if undo_last_section_cleanup(workspace, memo_id):
+                st.success("Last section cleanup was undone.")
                 st.rerun()
-        else:
-            st.caption("This section is too short to split.")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("Merge With Previous", key=f"merge_prev_{memo_id}_{item.section_id}"):
-                _save_boundary_merge(workspace, memo_id, item.section_id, "previous")
-                st.rerun()
-        with col2:
-            if st.button("Merge With Next", key=f"merge_next_{memo_id}_{item.section_id}"):
-                _save_boundary_merge(workspace, memo_id, item.section_id, "next")
-                st.rerun()
+            st.warning("No section cleanup is available to undo.")
+
+        section_choices = [
+            section
+            for section in sections
+            if section.get("section_id") != item.section_id and not section.get("missing_required")
+        ]
+        section_labels = {
+            str(section.get("section_id")): f"{section.get('canonical_section_name')} - {section.get('original_header')}"
+            for section in section_choices
+        }
+        standard_options = list(definitions.keys())
+        cleanup_actions: dict[str, dict[str, str]] = {}
+        with st.form(f"cleanup_section_{memo_id}_{item.section_id}"):
+            st.markdown("**Before saving**")
+            st.write(f"This section currently has {len(blocks)} text block(s). Choose only the blocks that need cleanup.")
+            for block in blocks:
+                st.markdown('<div class="soft-panel">', unsafe_allow_html=True)
+                st.markdown(f"**{block.label}**")
+                st.write(block.text)
+                action = st.selectbox(
+                    "Where should this text go?",
+                    [
+                        "Keep Here",
+                        "Move to Another Section",
+                        "Start New Section Here",
+                        "Add to Previous Section",
+                        "Mark as Duplicate",
+                    ],
+                    key=f"cleanup_action_{memo_id}_{item.section_id}_{block.block_id}",
+                    help="Choose the plain-English outcome for this paragraph. Most paragraphs should stay here.",
+                )
+                action_record = {"action": action}
+                if action == "Move to Another Section" and section_choices:
+                    target_section_id = st.selectbox(
+                        "Move this text to",
+                        list(section_labels),
+                        format_func=lambda value: section_labels.get(value, value),
+                        key=f"cleanup_target_{memo_id}_{item.section_id}_{block.block_id}",
+                    )
+                    action_record["target_section_id"] = target_section_id
+                elif action == "Move to Another Section":
+                    st.caption("No other sections are available yet. Choose a different action or create a new section.")
+                if action == "Start New Section Here":
+                    new_standard_section_id = st.selectbox(
+                        "What section should this become?",
+                        standard_options,
+                        index=standard_options.index(item.standard_section_id) if item.standard_section_id in standard_options else 0,
+                        format_func=lambda value: definitions[value].display_name,
+                        key=f"cleanup_new_section_{memo_id}_{item.section_id}_{block.block_id}",
+                    )
+                    action_record["new_standard_section_id"] = new_standard_section_id
+                cleanup_actions[block.block_id] = action_record
+                st.markdown("</div>", unsafe_allow_html=True)
+            st.markdown("**After saving**")
+            st.caption("Tag Studio will update the affected section text and keep an undo point for this cleanup.")
+            submitted = st.form_submit_button("Save Cleaned Text", type="primary")
+        if submitted:
+            apply_section_cleanup(workspace, memo_id, item.section_id, cleanup_actions, definitions)
+            st.success("Section text cleanup saved.")
+            st.rerun()
 
 
 def _render_section_exception_card(workspace: Path, memo_id: str, item, definitions: dict[str, Any], sections: list[dict[str, Any]]) -> None:
@@ -704,7 +679,8 @@ def _render_section_exception_card(workspace: Path, memo_id: str, item, definiti
         item.section_id
         and item.suggested_section_id
         and "low_confidence_match" in item.reason_codes
-        and st.button("Accept Suggestion", type="primary", key=f"accept_{memo_id}_{item.section_id}")
+        and item.suggested_section_id in definitions
+        and st.button("Use Suggested Section", type="primary", key=f"accept_{memo_id}_{item.section_id}")
     ):
         _save_section_mapping(
             workspace,
@@ -712,24 +688,18 @@ def _render_section_exception_card(workspace: Path, memo_id: str, item, definiti
             item.section_id,
             item.suggested_section_id,
             definitions[item.suggested_section_id].display_name,
-            remember_alias=True,
         )
         st.rerun()
 
     if item.section_id:
-        with st.expander("Change Standard Section"):
+        with st.expander("Choose Different Section"):
             current_id = item.standard_section_id if item.standard_section_id in definitions else section_options[0]
             selected_id = st.selectbox(
-                "Standard Memo Section",
+                "What kind of memo section is this?",
                 section_options,
                 index=section_options.index(current_id),
                 format_func=lambda value: definitions[value].display_name,
                 key=f"change_standard_{memo_id}_{item.section_id}",
-            )
-            remember_alias = st.checkbox(
-                "Remember this heading as an alias",
-                value="low_confidence_match" in item.reason_codes,
-                key=f"change_alias_{memo_id}_{item.section_id}",
             )
             if st.button("Save This Section", key=f"save_mapping_{memo_id}_{item.section_id}"):
                 _save_section_mapping(
@@ -738,7 +708,6 @@ def _render_section_exception_card(workspace: Path, memo_id: str, item, definiti
                     item.section_id,
                     selected_id,
                     definitions[selected_id].display_name,
-                    remember_alias=remember_alias,
                 )
                 st.rerun()
         if item.required and st.button("Mark Not Addressed", key=f"not_addressed_existing_{memo_id}_{item.section_id}"):
@@ -756,7 +725,7 @@ def _render_section_exception_card(workspace: Path, memo_id: str, item, definiti
                 updated_sections.append(section)
             save_sections(workspace, memo_id, updated_sections)
             st.rerun()
-        _render_boundary_tools(workspace, memo_id, item)
+        _render_section_cleanup_tools(workspace, memo_id, item, definitions, sections)
 
     if item.missing_section_id:
         with st.expander("Find It In Memo"):
@@ -772,19 +741,13 @@ def _render_section_exception_card(workspace: Path, memo_id: str, item, definiti
                     format_func=lambda value: labels[value],
                     key=f"map_missing_{memo_id}_{item.missing_section_id}",
                 )
-                remember_alias = st.checkbox(
-                    "Remember this heading as an alias",
-                    value=True,
-                    key=f"map_missing_alias_{memo_id}_{item.missing_section_id}",
-                )
-                if st.button("Map Selected Section", key=f"map_missing_save_{memo_id}_{item.missing_section_id}"):
+                if st.button("Use Selected Section", key=f"map_missing_save_{memo_id}_{item.missing_section_id}"):
                     _save_section_mapping(
                         workspace,
                         memo_id,
                         selected_section_id,
                         item.missing_section_id,
                         item.missing_section_name,
-                        remember_alias=remember_alias,
                     )
                     st.rerun()
             else:
@@ -800,7 +763,7 @@ def _render_section_exception_card(workspace: Path, memo_id: str, item, definiti
                     page_start = st.number_input("Page start", min_value=1, value=1, step=1)
                 with page_col2:
                     page_end = st.number_input("Page end", min_value=1, value=1, step=1)
-                reason = st.selectbox("Reason", ["OCR missed text", "Header not detected", "Scanned image issue", "Other"])
+                reason = st.selectbox("Reason", ["Text reader missed it", "Memo heading was not found", "Scanned page issue", "Other"])
                 manual_text = st.text_area("Section text", height=160)
                 submitted = st.form_submit_button("Save Manual Section")
             if submitted:
@@ -823,9 +786,10 @@ def _render_section_exception_card(workspace: Path, memo_id: str, item, definiti
 
 
 def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
-    st.subheader("Review Section Exceptions")
+    st.subheader("Review Memo Sections")
+    st.caption("Make sure the memo text is grouped under the right standard sections before tagging.")
     if not memo_id:
-        blocked_step("Add a memo before confirming sections.", "Add Memo")
+        blocked_step("Add a memo before reviewing memo sections.", "Add Memo")
         return
 
     memo = load_memo_record(workspace, memo_id)
@@ -846,32 +810,32 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
     definitions = {section.section_id: section for section in section_defs}
 
     if not text_quality_complete(workspace, memo_id):
-        blocked_step("Review the memo text quality before confirming sections.", "Review Text Quality")
+        blocked_step("Review the memo text quality before reviewing memo sections.", "Review Text Quality")
         return
 
     summary = classify_section_review(workspace, memo_id)
     count_cols = st.columns(3)
     with count_cols[0]:
-        _render_status_count("Must Fix", len(summary.must_fix), "hard")
+        _render_status_count("Needs Your Attention", len(summary.must_fix), "hard")
     with count_cols[1]:
-        _render_status_count("Can Review Later", len(summary.can_review_later), "review")
+        _render_status_count("Optional Checks", len(summary.can_review_later), "review")
     with count_cols[2]:
-        _render_status_count("Ready", len(summary.ready), "ready")
+        _render_status_count("Looks Good", len(summary.ready), "ready")
 
     if summary.must_fix:
-        st.markdown("##### Must Fix Before Continuing")
+        st.markdown("##### Needs Your Attention")
         for item in summary.must_fix:
             _render_section_exception_card(workspace, memo_id, item, definitions, sections)
     else:
-        st.success("All Required Sections Are Ready.")
+        st.success("All required memo sections are ready.")
 
     if summary.can_review_later:
-        st.markdown("##### Can Review Later")
-        st.caption("These warnings remain visible, but they do not block facility setup.")
+        st.markdown("##### Optional Checks")
+        st.caption("These items are worth a quick look, but they do not stop you from continuing.")
         for item in summary.can_review_later:
             _render_section_exception_card(workspace, memo_id, item, definitions, sections)
 
-    with st.expander(f"Ready Sections ({len(summary.ready)})", expanded=False):
+    with st.expander(f"Looks Good ({len(summary.ready)})", expanded=False):
         if not summary.ready:
             st.caption("No ready sections yet.")
         for item in summary.ready:
@@ -888,11 +852,10 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
 
     st.markdown("##### Next Action")
     if summary.must_fix:
-        st.warning(f"Resolve {len(summary.must_fix)} required item(s) before continuing.")
-        st.button("Resolve Required Items First", disabled=True)
+        st.warning(f"Review {len(summary.must_fix)} item(s) before continuing.")
+        st.button("Review Items Above First", disabled=True)
     elif st.button("Continue to Set Up Facilities", type="primary"):
-        st.session_state["selected_step"] = "Set Up Facilities"
-        st.rerun()
+        go_to_step("Set Up Facilities")
 
 
 def _display_required(label: str, required: bool) -> str:
@@ -926,12 +889,13 @@ def _render_tag_input(definition: TagDefinition, key: str):
 
 def set_up_facilities_page(workspace: Path, memo_id: str | None) -> None:
     st.subheader("Set Up Facilities")
+    st.caption("Confirm the facilities that will receive facility-specific tags and outcome records.")
     if not memo_id:
         blocked_step("Add a memo before setting up facilities.", "Add Memo")
         return
     statuses = step_summary(workspace, memo_id)
-    if statuses["Confirm Sections"] != "Complete":
-        blocked_step("Confirm sections before setting up facilities.", "Confirm Sections")
+    if statuses["Review Memo Sections"] != "Complete":
+        blocked_step("Review memo sections before setting up facilities.", "Review Memo Sections")
         return
 
     memo = load_memo_record(workspace, memo_id)
@@ -941,7 +905,7 @@ def set_up_facilities_page(workspace: Path, memo_id: str | None) -> None:
         facilities = _suggest_facilities(memo_id, str(memo.get("customer_id", "")), sections)
         save_facilities(workspace, memo_id, facilities)
 
-    st.caption("Confirm the credit facilities in this memo. Facility-specific tags and outcomes will attach to these records.")
+    st.caption("Review the suggested facilities. Add, edit, confirm, or reject each row before tagging.")
     rows = [
         {
             "_facility_id": facility.get("facility_id"),
@@ -968,7 +932,7 @@ def set_up_facilities_page(workspace: Path, memo_id: str | None) -> None:
     )
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("Save Facilities", type="primary"):
+        if st.button("Save Facility Review", type="primary"):
             saved = []
             for row in edited.fillna("").to_dict("records"):
                 name = str(row.get("Facility Name") or "").strip()
@@ -992,7 +956,7 @@ def set_up_facilities_page(workspace: Path, memo_id: str | None) -> None:
                     ).model_dump()
                 )
             save_facilities(workspace, memo_id, saved)
-            st.success("Facilities saved.")
+            st.success("Facility review saved.")
             st.rerun()
     with col2:
         confirmed = [facility for facility in facilities if facility.get("reviewer_confirmed") or facility.get("status") == "Confirmed"]
@@ -1002,6 +966,7 @@ def set_up_facilities_page(workspace: Path, memo_id: str | None) -> None:
 
 def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
     st.subheader("Tag Credit Review")
+    st.caption("Review one memo section at a time, capture the credit judgment, and attach the evidence that supports it.")
     if not memo_id:
         blocked_step("Add a memo before tagging the credit review.", "Add Memo")
         return
@@ -1023,7 +988,7 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
         section["section_id"]: f"{section.get('canonical_section_name')} - p.{section.get('page_start')}-{section.get('page_end')}"
         for section in sections
     }
-    section_id = st.selectbox("Section to review", list(section_labels.keys()), format_func=lambda value: section_labels[value])
+    section_id = st.selectbox("Memo section to tag", list(section_labels.keys()), format_func=lambda value: section_labels[value])
     section = next(item for item in sections if item["section_id"] == section_id)
     relevant_tags = tags_for_section(workspace, section)
 
@@ -1060,7 +1025,7 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
         if selected_line_text:
             st.text_area("Selected evidence", selected_line_text, height=90, disabled=True)
         manual_evidence_text = st.text_area(
-            "Correction or note",
+            "Evidence correction or note",
             height=90,
             key=f"evidence_text_{memo_id}_{section_id}",
             help="Use this when the extracted text needs correction.",
@@ -1115,7 +1080,11 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
             item["evidence_id"]: f"{item.get('selected_text', '')[:90]}..." if len(item.get("selected_text", "")) > 90 else item.get("selected_text", "")
             for item in section_evidence
         }
-        selected_evidence = st.multiselect("Attach evidence to saved tags", list(evidence_options.keys()), format_func=lambda value: evidence_options[value])
+        selected_evidence = st.multiselect(
+            "Use this evidence for saved tags",
+            list(evidence_options.keys()),
+            format_func=lambda value: evidence_options[value],
+        )
 
     st.markdown("##### Credit Tags")
     with st.form(f"tag_form_{memo_id}_{section_id}"):
@@ -1133,17 +1102,18 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
                 for idx, definition in enumerate(grouped[category]):
                     with cols[idx % 2]:
                         scopes[definition.tag_id] = st.selectbox(
-                            f"{definition.label} scope",
+                            f"{definition.label} applies to",
                             definition.allowed_scopes or ["section"],
                             index=(definition.allowed_scopes or ["section"]).index(definition.default_scope)
                             if definition.default_scope in (definition.allowed_scopes or ["section"])
                             else 0,
                             key=f"scope_{memo_id}_{section_id}_{definition.tag_id}",
-                            help="Choose whether this tag applies to the memo, borrower, facility, section, or outcome.",
+                            format_func=lambda value: SCOPE_LABELS.get(str(value), str(value).title()),
+                            help="Choose the part of the credit review this tag describes.",
                         )
                         if definition.facility_required or "facility" in (definition.allowed_scopes or []):
                             facility_assignments[definition.tag_id] = st.selectbox(
-                                f"{definition.label} facility",
+                                f"{definition.label} facility reviewed",
                                 facility_options,
                                 format_func=lambda value: facility_labels.get(value, value),
                                 key=f"facility_{memo_id}_{section_id}_{definition.tag_id}",
@@ -1156,7 +1126,7 @@ def tag_credit_review_page(workspace: Path, memo_id: str | None) -> None:
             index=1,
             help="Rate how confident you are that the saved tags accurately reflect this section.",
         )
-        tagger = st.text_input("Reviewer", value=memo.get("reviewer", ""))
+        tagger = st.text_input("Reviewer name", value=memo.get("reviewer", ""))
         save_batch = st.form_submit_button("Save This Section", type="primary")
 
     if save_batch:
@@ -1244,7 +1214,9 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
     source_confidence_options = ["High", "Medium", "Low"]
     foreseeability_options = ["Visible in memo", "Partially visible", "Hindsight-only", "Not assessed", "N/A"]
 
-    st.caption("Outcome tagging is the second pass. Record later facility outcomes separately from the as-of credit review.")
+    st.caption(
+        "Record what happened after credit was extended. If the deal is too new and nothing adverse has happened, mark it as not seasoned yet."
+    )
     saved_summaries: list[dict[str, Any]] = []
     saved_events: list[dict[str, Any]] = []
     saved_assessments: list[dict[str, Any]] = []
@@ -1260,7 +1232,7 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
             col1, col2, col3 = st.columns(3)
             with col1:
                 availability_state = st.selectbox(
-                    "Outcome Availability State",
+                    "What do we know about this facility outcome?",
                     DEFAULT_OUTCOME_AVAILABILITY_STATES,
                     index=DEFAULT_OUTCOME_AVAILABILITY_STATES.index(existing_summary.get("outcome_availability_state"))
                     if existing_summary.get("outcome_availability_state") in DEFAULT_OUTCOME_AVAILABILITY_STATES
@@ -1268,29 +1240,34 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
                     key=f"outcome_state_{memo_id}_{facility_id}",
                 )
                 seasoning_months = st.number_input(
-                    "Seasoning window months",
+                    "Months needed before a clean outcome is seasoned",
                     min_value=1,
                     max_value=120,
                     value=int(existing_summary.get("seasoning_months") or 12),
                     key=f"seasoning_{memo_id}_{facility_id}",
                 )
             with col2:
-                closing_date = st.text_input("Facility closing date", value=facility.get("closing_date", ""), key=f"closing_date_{memo_id}_{facility_id}")
+                closing_date = st.text_input(
+                    "Facility closing date",
+                    value=facility.get("closing_date", ""),
+                    key=f"closing_date_{memo_id}_{facility_id}",
+                    help="Use the date credit was legally extended.",
+                )
                 facility_closing_dates[facility_id] = closing_date
                 summary_source_type = st.selectbox(
-                    "Summary source type",
+                    "Where was the outcome checked?",
                     source_type_options,
                     index=source_type_options.index(existing_summary.get("source_type")) if existing_summary.get("source_type") in source_type_options else 0,
                     key=f"summary_source_type_{memo_id}_{facility_id}",
                 )
             with col3:
                 summary_checked_date = st.text_input(
-                    "Summary source checked date",
+                    "Date outcome was checked",
                     value=existing_summary.get("source_checked_date", ""),
                     key=f"summary_checked_{memo_id}_{facility_id}",
                 )
                 summary_confidence = st.selectbox(
-                    "Summary source confidence",
+                    "Confidence in outcome information",
                     source_confidence_options,
                     index=source_confidence_options.index(existing_summary.get("source_confidence", "Medium"))
                     if existing_summary.get("source_confidence", "Medium") in source_confidence_options
@@ -1298,7 +1275,7 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
                     key=f"summary_confidence_{memo_id}_{facility_id}",
                 )
             summary_note = st.text_area(
-                "Summary source note",
+                "Outcome note",
                 value=existing_summary.get("source_note", ""),
                 key=f"summary_note_{memo_id}_{facility_id}",
                 height=70,
@@ -1327,6 +1304,7 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
                 "Source Note",
             ]
             st.markdown("###### Adverse Outcome Events")
+            st.caption("If more than one adverse event occurred, Tag Studio will treat the most severe observed event as primary.")
             edited_events = st.data_editor(
                 pd.DataFrame(event_rows, columns=event_columns),
                 num_rows="dynamic",
@@ -1362,16 +1340,16 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
             primary_event_id = str(primary_event.get("outcome_event_id", "")) if primary_event else ""
             if primary_event:
                 st.caption(
-                    f"Primary adverse outcome will be derived as: {primary_event.get('event_type')} "
+                    f"Primary adverse outcome: {primary_event.get('event_type')} "
                     f"(severity {primary_event.get('severity_rank')})."
                 )
 
-            st.markdown("###### Foreseeability Assessment")
+            st.markdown("###### Warning Signs in the Memo")
             assessment = assessments_by_event.get(primary_event_id) if primary_event_id else existing_assessment or {}
             col_a, col_b = st.columns([1, 1.3])
             with col_a:
                 foreseeability = st.selectbox(
-                    "Foreseeability",
+                    "Could the issue be seen in the memo?",
                     foreseeability_options,
                     index=foreseeability_options.index(assessment.get("foreseeability", "Not assessed"))
                     if assessment.get("foreseeability", "Not assessed") in foreseeability_options
@@ -1380,14 +1358,19 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
                 )
             with col_b:
                 memo_evidence_ids = st.multiselect(
-                    "Linked memo evidence",
+                    "Memo evidence showing warning signs",
                     [str(item.get("evidence_id")) for item in memo_evidence],
                     default=[item for item in assessment.get("memo_evidence_ids", []) if item in {e.get("evidence_id") for e in memo_evidence}],
                     format_func=lambda evidence_id: _memo_evidence_label(next((item for item in memo_evidence if item.get("evidence_id") == evidence_id), {})),
                     key=f"foreseeability_evidence_{memo_id}_{facility_id}",
                     help="Required when foreseeability is Visible in memo or Partially visible.",
                 )
-            rationale = st.text_area("Foreseeability rationale", value=assessment.get("rationale", ""), key=f"outcome_rationale_{memo_id}_{facility_id}", height=80)
+            rationale = st.text_area(
+                "Why this outcome was or was not visible",
+                value=assessment.get("rationale", ""),
+                key=f"outcome_rationale_{memo_id}_{facility_id}",
+                height=80,
+            )
 
             saved_events.extend(facility_events)
             saved_summaries.append(
@@ -1423,7 +1406,7 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
                     ).model_dump()
                 )
             st.divider()
-        submitted = st.form_submit_button("Save Outcomes", type="primary")
+        submitted = st.form_submit_button("Save Outcome Review", type="primary")
     if submitted:
         updated_facilities = []
         for facility in load_facilities(workspace, memo_id):
@@ -1436,13 +1419,13 @@ def tag_outcomes_page(workspace: Path, memo_id: str | None) -> None:
         save_outcome_summaries(workspace, memo_id, saved_summaries)
         save_outcome_events(workspace, memo_id, saved_events)
         save_foreseeability_assessments(workspace, memo_id, saved_assessments)
-        st.success("Outcome tags saved.")
-        st.session_state["selected_step"] = "Quality Check"
-        st.rerun()
+        st.success("Outcome review saved.")
+        go_to_step("Quality Check")
 
 
 def quality_check_page(workspace: Path, memo_id: str | None) -> None:
     st.subheader("Quality Check")
+    st.caption("Confirm the memo is complete enough to approve for the training dataset.")
     if not memo_id:
         blocked_step("Add a memo before running the quality check.", "Add Memo")
         return
@@ -1455,7 +1438,7 @@ def quality_check_page(workspace: Path, memo_id: str | None) -> None:
         cols,
         [
             ("Pages Checked", f"{metrics['pages_checked']} / {metrics['pages_total']}"),
-            ("Sections Confirmed", f"{metrics['sections_confirmed']} / {metrics['sections_total']}"),
+            ("Memo Sections", f"{metrics['sections_confirmed']} / {metrics['sections_total']}"),
             ("Facilities", f"{metrics['facilities_confirmed']} / {metrics['facilities_total']}"),
             ("Outcomes", metrics["outcomes_total"]),
             ("Review Status", STATUS_LABELS.get(review.get("status", "Draft"), review.get("status", "Draft"))),
@@ -1471,8 +1454,8 @@ def quality_check_page(workspace: Path, memo_id: str | None) -> None:
             st.write(f"- {finding}")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("Return to Confirm Sections"):
-                go_to_step("Confirm Sections")
+            if st.button("Return to Review Memo Sections"):
+                go_to_step("Review Memo Sections")
         with col2:
             if st.button("Return to Tag Credit Review"):
                 go_to_step("Tag Credit Review")
@@ -1480,7 +1463,7 @@ def quality_check_page(workspace: Path, memo_id: str | None) -> None:
 
     st.success("This memo is ready to approve for the training dataset.")
     with st.form(f"approve_{memo_id}"):
-        reviewer = st.text_input("Reviewer", value=review.get("reviewer", load_memo_record(workspace, memo_id).get("reviewer", "")))
+        reviewer = st.text_input("Reviewer name", value=review.get("reviewer", load_memo_record(workspace, memo_id).get("reviewer", "")))
         adjudicator = st.text_input("Approver", value=review.get("adjudicator", ""))
         if reviewer and adjudicator and reviewer == adjudicator:
             st.warning("You are approving your own review. This is allowed, and the approval will be audited.")
@@ -1518,12 +1501,12 @@ def quality_check_page(workspace: Path, memo_id: str | None) -> None:
         )
         save_review(workspace, memo_id, review)
         append_audit(workspace, memo_id, "approved_for_training_dataset", review)
-        st.session_state["selected_step"] = "Download Results"
-        st.rerun()
+        go_to_step("Download Results")
 
 
 def download_results_page(workspace: Path, memo_id: str | None) -> None:
     st.subheader("Download Results")
+    st.caption("Create the reviewer workbook, training files, and audit package for the approved memo set.")
     if not memo_id:
         blocked_step("Add a memo before downloading results.", "Add Memo")
         return
@@ -1551,11 +1534,11 @@ def download_results_page(workspace: Path, memo_id: str | None) -> None:
         if review_path and review_path.exists():
             st.download_button("Download Review Workbook", data=review_path.read_bytes(), file_name=review_path.name)
     with col2:
-        st.markdown('<div class="soft-panel"><b>Training File</b><br><span class="small-muted">Structured file for the model tuning pipeline.</span></div>', unsafe_allow_html=True)
+        st.markdown('<div class="soft-panel"><b>Training File</b><br><span class="small-muted">Structured files for the project team.</span></div>', unsafe_allow_html=True)
         if st.button(
             "Prepare Training File",
             type="primary",
-            help="Create the structured training files from approved memo records.",
+            help="Create the training files from approved memo reviews.",
         ):
             paths = export_jsonl(workspace, include_only_approved=True)
             prepared["span_training"] = str(paths["spans"])
@@ -1579,9 +1562,9 @@ def download_results_page(workspace: Path, memo_id: str | None) -> None:
         if outcome_training_path and outcome_training_path.exists():
             st.download_button("Download Outcome Training File", data=outcome_training_path.read_bytes(), file_name=outcome_training_path.name)
         if training_audit_path and training_audit_path.exists():
-            st.download_button("Download Training Audit File", data=training_audit_path.read_bytes(), file_name=training_audit_path.name)
+            st.download_button("Download Training Audit Trail", data=training_audit_path.read_bytes(), file_name=training_audit_path.name)
         if training_manifest_path and training_manifest_path.exists():
-            st.download_button("Download Training Export Manifest", data=training_manifest_path.read_bytes(), file_name=training_manifest_path.name)
+            st.download_button("Download Training Summary", data=training_manifest_path.read_bytes(), file_name=training_manifest_path.name)
     with col3:
         st.markdown('<div class="soft-panel"><b>Audit Package</b><br><span class="small-muted">Traceability package for QA.</span></div>', unsafe_allow_html=True)
         if st.button(

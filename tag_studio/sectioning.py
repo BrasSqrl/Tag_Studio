@@ -32,18 +32,32 @@ def heading_candidates(page_text: str) -> list[tuple[str, int]]:
     return candidates
 
 
-def match_section(header: str, definitions: list[SectionDefinition]) -> SectionDefinition | None:
-    ranked = ranked_section_matches(header, definitions)
+def match_section(
+    header: str,
+    definitions: list[SectionDefinition],
+    learned_headings: dict[str, list[str]] | None = None,
+) -> SectionDefinition | None:
+    ranked = ranked_section_matches(header, definitions, learned_headings=learned_headings)
     if ranked and ranked[0][1] >= MATCH_THRESHOLD:
         return ranked[0][0]
     return None
 
 
-def ranked_section_matches(header: str, definitions: list[SectionDefinition], limit: int = 3) -> list[tuple[SectionDefinition, float, str]]:
+def ranked_section_matches(
+    header: str,
+    definitions: list[SectionDefinition],
+    limit: int = 3,
+    learned_headings: dict[str, list[str]] | None = None,
+) -> list[tuple[SectionDefinition, float, str]]:
     normalized = normalize_text(header)
     matches: list[tuple[SectionDefinition, float, str]] = []
     for definition in definitions:
-        names = [definition.display_name, definition.section_id.replace("_", " "), *definition.aliases]
+        names = [
+            definition.display_name,
+            definition.section_id.replace("_", " "),
+            *definition.aliases,
+            *(learned_headings or {}).get(definition.section_id, []),
+        ]
         best_score = 0.0
         best_reason = "similar wording"
         for name in names:
@@ -64,13 +78,14 @@ def propose_section_candidates(
     memo_id: str,
     pages: list[dict],
     definitions: list[SectionDefinition],
+    learned_headings: dict[str, list[str]] | None = None,
 ) -> list[SectionCandidateRecord]:
     candidates: list[SectionCandidateRecord] = []
     seen = set()
     for page in pages:
         page_number = int(page.get("page_number", 1))
         for header, line_idx in heading_candidates(page.get("text", "")):
-            ranked = ranked_section_matches(header, definitions)
+            ranked = ranked_section_matches(header, definitions, learned_headings=learned_headings)
             if not ranked:
                 continue
             best_definition, best_score, reason = ranked[0]
@@ -131,6 +146,7 @@ def propose_sections(
     pages: list[dict],
     definitions: list[SectionDefinition],
     extraction_method: str,
+    learned_headings: dict[str, list[str]] | None = None,
 ) -> list[SectionRecord]:
     found: list[tuple[int, int, str, SectionDefinition | None]] = []
     page_lines: dict[int, list[str]] = {}
@@ -139,7 +155,7 @@ def propose_sections(
         page_number = int(page["page_number"])
         page_lines[page_number] = text.splitlines()
         for header, line_idx in heading_candidates(text):
-            match = match_section(header, definitions)
+            match = match_section(header, definitions, learned_headings=learned_headings)
             if match:
                 found.append((page_number, line_idx, header, match))
 

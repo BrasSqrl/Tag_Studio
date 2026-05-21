@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tag_studio.services import acquire_or_refresh_lock, quality_findings
+from tag_studio.services import quality_findings
 from tag_studio.storage import create_memo_workspace, ensure_workspace, memo_dir, save_sections, write_json
 
 
@@ -59,47 +59,3 @@ def test_quality_findings_flags_unreviewed_pages_and_missing_tags(tmp_path) -> N
     assert any("Hard-to-read pages" in finding for finding in findings)
     assert any("No credit tags" in finding for finding in findings)
     assert any("Missing required tags" in finding for finding in findings)
-
-
-def test_memo_lock_blocks_other_active_session(tmp_path) -> None:
-    workspace = tmp_path / "workspace"
-    ensure_workspace(workspace)
-    memo = create_memo_workspace(
-        workspace=workspace,
-        pdf_bytes=b"%PDF-1.4\n% synthetic fixture\n",
-        file_name="sample.pdf",
-        memo_id="memo_lock_001",
-        memo_type="Renewal",
-        facility_type="Revolver",
-        customer_id="1001",
-        reviewer="tester",
-    )
-
-    first_ok, _, first_lock = acquire_or_refresh_lock(
-        workspace,
-        memo.memo_id,
-        session_id="session_a",
-        owner_name="Reviewer A",
-        current_step="Tag Credit Review",
-    )
-    second_ok, second_message, second_lock = acquire_or_refresh_lock(
-        workspace,
-        memo.memo_id,
-        session_id="session_b",
-        owner_name="Reviewer B",
-        current_step="Tag Credit Review",
-    )
-    refresh_ok, _, refresh_lock = acquire_or_refresh_lock(
-        workspace,
-        memo.memo_id,
-        session_id="session_a",
-        owner_name="Reviewer A",
-        current_step="Quality Check",
-    )
-
-    assert first_ok
-    assert not second_ok
-    assert "Reviewer A" in second_message
-    assert second_lock["lock_id"] == first_lock["lock_id"]
-    assert refresh_ok
-    assert refresh_lock["current_step"] == "Quality Check"

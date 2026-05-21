@@ -8,7 +8,7 @@ USER_GUIDE_PATH = PROJECT_ROOT / "docs" / "user_guide" / "tag_studio_user_guide.
 WIZARD_STEPS = [
     "Add Memo",
     "Review Text Quality",
-    "Confirm Sections",
+    "Review Memo Sections",
     "Set Up Facilities",
     "Tag Credit Review",
     "Tag Outcomes",

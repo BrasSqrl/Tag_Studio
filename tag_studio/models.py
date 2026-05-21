@@ -242,17 +242,6 @@ class ReviewRecord(BaseModel):
     updated_at: str = Field(default_factory=utc_now)
 
 
-class MemoLockRecord(BaseModel):
-    memo_id: str
-    lock_id: str
-    owner_session_id: str
-    owner_name: str = ""
-    current_step: str = ""
-    acquired_at: str = Field(default_factory=utc_now)
-    heartbeat_at: str = Field(default_factory=utc_now)
-    expires_at: str
-
-
 class FacilityRecord(BaseModel):
     facility_id: str
     memo_id: str

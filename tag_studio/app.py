@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from uuid import uuid4
 
 import streamlit as st
 
@@ -22,13 +21,12 @@ from tag_studio.pages.reviewer import (
     tag_credit_review_page,
     tag_outcomes_page,
 )
-from tag_studio.services import MemoReadService, WorkflowService, acquire_or_refresh_lock
+from tag_studio.services import MemoReadService, WorkflowService
 from tag_studio.storage import (
     DEFAULT_WORKSPACE,
     ensure_workspace,
     hydrate_memo_from_remote,
     list_memo_ids,
-    load_memo_record,
     storage_readiness,
 )
 from tag_studio.ui_components import show_header, show_progress
@@ -74,7 +72,7 @@ def route_reviewer_page(workspace: Path, active_memo_id: str | None, selected_st
         add_memo_page(workspace)
     elif selected_step == "Review Text Quality":
         review_text_quality_page(workspace, active_memo_id)
-    elif selected_step == "Confirm Sections":
+    elif selected_step == "Review Memo Sections":
         confirm_sections_page(workspace, active_memo_id)
     elif selected_step == "Set Up Facilities":
         set_up_facilities_page(workspace, active_memo_id)
@@ -94,9 +92,14 @@ def main() -> None:
     active_memo_id = choose_memo(workspace)
     statuses = WorkflowService(workspace).step_summary(active_memo_id)
 
+    pending_step = st.session_state.pop("_pending_review_step", None)
+    if pending_step in WIZARD_STEPS:
+        st.session_state["selected_step"] = pending_step
+
     default_step = st.session_state.get("selected_step", "Add Memo")
     if default_step not in WIZARD_STEPS:
         default_step = "Add Memo"
+        st.session_state["selected_step"] = default_step
 
     admin_mode = st.sidebar.checkbox("Admin Tools", value=False)
     guide_mode = st.sidebar.checkbox("User Guide", value=False, help="Open the credit reviewer guide for this app.")
@@ -108,22 +111,13 @@ def main() -> None:
         admin_tools_page(workspace, active_memo_id)
         return
 
-    selected_step = st.sidebar.radio("Review Steps", WIZARD_STEPS, index=WIZARD_STEPS.index(default_step))
+    selected_step = st.sidebar.radio(
+        "Review Steps",
+        WIZARD_STEPS,
+        index=WIZARD_STEPS.index(default_step),
+        key=f"review_step_radio_{WIZARD_STEPS.index(default_step)}",
+    )
     st.session_state["selected_step"] = selected_step
-    if active_memo_id and selected_step not in {"Add Memo", "Download Results"}:
-        session_id = st.session_state.setdefault("tag_studio_session_id", f"session_{uuid4().hex[:12]}")
-        memo = load_memo_record(workspace, active_memo_id)
-        ok, message, lock = acquire_or_refresh_lock(
-            workspace,
-            active_memo_id,
-            session_id=session_id,
-            owner_name=str(memo.get("reviewer") or "Current reviewer"),
-            current_step=selected_step,
-        )
-        if not ok:
-            st.warning(message)
-            st.caption(f"Lock expires at {lock.get('expires_at', 'unknown')}. Ask an admin to clear a stale lock if needed.")
-            return
     show_progress(selected_step, statuses)
     route_reviewer_page(workspace, active_memo_id, selected_step)
 

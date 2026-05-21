@@ -43,4 +43,4 @@ def user_guide_page() -> None:
         mime="text/html",
         help="Download the standalone guide so it can be opened outside Tag Studio.",
     )
-    st.iframe(USER_GUIDE_PATH, height=920)
+    st.html(download_html)
