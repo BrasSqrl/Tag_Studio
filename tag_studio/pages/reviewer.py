@@ -42,9 +42,12 @@ from tag_studio.models import (
 )
 from tag_studio.sectioning import propose_sections
 from tag_studio.services import (
+    accept_section,
+    accept_sections,
     apply_section_cleanup,
     classify_section_review,
     derive_primary_outcome,
+    facility_review_rows_to_records,
     load_learned_heading_matches,
     load_section_defs,
     memo_display_name,
@@ -579,11 +582,37 @@ def _render_section_item_header(item) -> None:
         st.write(f"**Current standard section:** {item.standard_section_name}")
     if item.suggested_section_name:
         st.write(f"**Suggested standard section:** {item.suggested_section_name}")
+
+
+def _render_section_item_details(item) -> None:
     for reason in item.reasons:
         st.write(f"- {reason}")
     if item.text_preview:
         st.markdown("**Section text preview**")
         st.write(item.text_preview)
+
+
+def _render_section_acceptance_action(workspace: Path, memo_id: str, item, *, key_prefix: str) -> None:
+    if not item.section_id or item.missing_section_id or not item.standard_section_id:
+        return
+    accepted = bool((item.section or {}).get("reviewer_confirmed"))
+    cols = st.columns([2.7, 1])
+    with cols[0]:
+        if accepted:
+            st.success("Accepted for section review. This confirms the text is assigned to the right Standard Memo Section.")
+        else:
+            st.info("Needs acceptance. Confirm this heading and text belong under the Standard Memo Section shown above.")
+    with cols[1]:
+        if accepted:
+            st.button("Accepted", key=f"{key_prefix}_accepted_{memo_id}_{item.section_id}", disabled=True)
+        elif st.button(
+            "Accept This Section",
+            type="primary",
+            key=f"{key_prefix}_accept_{memo_id}_{item.section_id}",
+            help="Use this when the section heading and text are grouped under the right Standard Memo Section. This is not a credit approval.",
+        ):
+            accept_section(workspace, memo_id, item.section_id)
+            st.rerun()
 
 
 def _render_section_cleanup_tools(
@@ -674,13 +703,15 @@ def _render_section_cleanup_tools(
 def _render_section_exception_card(workspace: Path, memo_id: str, item, definitions: dict[str, Any], sections: list[dict[str, Any]]) -> None:
     st.markdown('<div class="review-card">', unsafe_allow_html=True)
     _render_section_item_header(item)
+    _render_section_acceptance_action(workspace, memo_id, item, key_prefix="exception")
+    _render_section_item_details(item)
     section_options = list(definitions.keys())
     if (
         item.section_id
         and item.suggested_section_id
         and "low_confidence_match" in item.reason_codes
         and item.suggested_section_id in definitions
-        and st.button("Use Suggested Section", type="primary", key=f"accept_{memo_id}_{item.section_id}")
+        and st.button("Accept Suggested Section", type="primary", key=f"accept_{memo_id}_{item.section_id}")
     ):
         _save_section_mapping(
             workspace,
@@ -701,7 +732,7 @@ def _render_section_exception_card(workspace: Path, memo_id: str, item, definiti
                 format_func=lambda value: definitions[value].display_name,
                 key=f"change_standard_{memo_id}_{item.section_id}",
             )
-            if st.button("Save This Section", key=f"save_mapping_{memo_id}_{item.section_id}"):
+            if st.button("Accept Selected Section", key=f"save_mapping_{memo_id}_{item.section_id}"):
                 _save_section_mapping(
                     workspace,
                     memo_id,
@@ -785,6 +816,14 @@ def _render_section_exception_card(workspace: Path, memo_id: str, item, definiti
     st.markdown("</div>", unsafe_allow_html=True)
 
 
+def _render_ready_section_card(workspace: Path, memo_id: str, item) -> None:
+    st.markdown('<div class="review-card">', unsafe_allow_html=True)
+    _render_section_item_header(item)
+    _render_section_acceptance_action(workspace, memo_id, item, key_prefix="ready")
+    _render_section_item_details(item)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
 def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
     st.subheader("Review Memo Sections")
     st.caption("Make sure the memo text is grouped under the right standard sections before tagging.")
@@ -814,20 +853,24 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
         return
 
     summary = classify_section_review(workspace, memo_id)
+    unaccepted_sections = [section for section in sections if not section.get("reviewer_confirmed")]
+    accepted_sections = [section for section in sections if section.get("reviewer_confirmed")]
     count_cols = st.columns(3)
     with count_cols[0]:
-        _render_status_count("Needs Your Attention", len(summary.must_fix), "hard")
+        _render_status_count("Needs Fix", len(summary.must_fix), "hard")
     with count_cols[1]:
-        _render_status_count("Optional Checks", len(summary.can_review_later), "review")
+        _render_status_count("Needs Acceptance", len(unaccepted_sections), "review")
     with count_cols[2]:
-        _render_status_count("Looks Good", len(summary.ready), "ready")
+        _render_status_count("Accepted", len(accepted_sections), "ready")
+
+    st.caption("Accepting a section means the heading and text are assigned to the right Standard Memo Section. It is not a credit approval.")
 
     if summary.must_fix:
         st.markdown("##### Needs Your Attention")
         for item in summary.must_fix:
             _render_section_exception_card(workspace, memo_id, item, definitions, sections)
     else:
-        st.success("All required memo sections are ready.")
+        st.success("All required memo section issues are resolved.")
 
     if summary.can_review_later:
         st.markdown("##### Optional Checks")
@@ -835,25 +878,32 @@ def confirm_sections_page(workspace: Path, memo_id: str | None) -> None:
         for item in summary.can_review_later:
             _render_section_exception_card(workspace, memo_id, item, definitions, sections)
 
-    with st.expander(f"Looks Good ({len(summary.ready)})", expanded=False):
+    ready_unaccepted_ids = [
+        item.section_id
+        for item in summary.ready
+        if item.section_id and not (item.section or {}).get("reviewer_confirmed")
+    ]
+    with st.expander(f"Looks Good ({len(summary.ready)})", expanded=bool(ready_unaccepted_ids)):
         if not summary.ready:
             st.caption("No ready sections yet.")
+        elif ready_unaccepted_ids and st.button(
+            "Accept All Looks Good Sections",
+            type="primary",
+            help="Accepts only the high-confidence sections shown in this Looks Good list.",
+        ):
+            accepted_count = accept_sections(workspace, memo_id, ready_unaccepted_ids)
+            st.success(f"Accepted {accepted_count} section(s).")
+            st.rerun()
         for item in summary.ready:
-            confidence = f"{int(item.confidence * 100)}%" if item.confidence else "Not available"
-            st.markdown(
-                f"**{escape(item.standard_section_name or item.suggested_section_name)}**  \n"
-                f"<span class='small-muted'>{escape(item.original_heading)} | "
-                f"Pages {item.page_start}-{item.page_end} | {confidence}</span>",
-                unsafe_allow_html=True,
-            )
-            if item.text_preview:
-                with st.expander(f"Preview: {item.original_heading}", expanded=False):
-                    st.write(item.text_preview)
+            _render_ready_section_card(workspace, memo_id, item)
 
     st.markdown("##### Next Action")
     if summary.must_fix:
         st.warning(f"Review {len(summary.must_fix)} item(s) before continuing.")
         st.button("Review Items Above First", disabled=True)
+    elif unaccepted_sections:
+        st.warning(f"Accept {len(unaccepted_sections)} section(s) before continuing.")
+        st.button("Accept Sections Above First", disabled=True)
     elif st.button("Continue to Set Up Facilities", type="primary"):
         go_to_step("Set Up Facilities")
 
@@ -905,7 +955,7 @@ def set_up_facilities_page(workspace: Path, memo_id: str | None) -> None:
         facilities = _suggest_facilities(memo_id, str(memo.get("customer_id", "")), sections)
         save_facilities(workspace, memo_id, facilities)
 
-    st.caption("Review the suggested facilities. Add, edit, confirm, or reject each row before tagging.")
+    st.caption("Review the suggested facilities. Saving confirms each completed facility unless you mark it Rejected.")
     rows = [
         {
             "_facility_id": facility.get("facility_id"),
@@ -933,30 +983,17 @@ def set_up_facilities_page(workspace: Path, memo_id: str | None) -> None:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("Save Facility Review", type="primary"):
-            saved = []
-            for row in edited.fillna("").to_dict("records"):
-                name = str(row.get("Facility Name") or "").strip()
-                if not name:
-                    continue
-                status = str(row.get("Status") or "Proposed")
-                if status not in {"Proposed", "Confirmed", "Rejected"}:
-                    status = "Proposed"
-                saved.append(
-                    FacilityRecord(
-                        facility_id=slugify(str(row.get("_facility_id") or f"facility_{name}")),
-                        memo_id=memo_id,
-                        customer_id=str(memo.get("customer_id", "")),
-                        facility_name=name,
-                        facility_type=str(row.get("Facility Type") or "Other"),
-                        amount=str(row.get("Amount") or ""),
-                        closing_date=str(row.get("Facility Closing Date") or ""),
-                        source_evidence=str(row.get("Why Suggested") or ""),
-                        reviewer_confirmed=status == "Confirmed",
-                        status=status,  # type: ignore[arg-type]
-                    ).model_dump()
-                )
+            saved = facility_review_rows_to_records(
+                memo_id,
+                str(memo.get("customer_id", "")),
+                edited.fillna("").to_dict("records"),
+            )
             save_facilities(workspace, memo_id, saved)
-            st.success("Facility review saved.")
+            confirmed_count = len([facility for facility in saved if facility.get("reviewer_confirmed") or facility.get("status") == "Confirmed"])
+            if confirmed_count:
+                st.success("Facility review saved. This step is complete.")
+            else:
+                st.warning("Facility review saved, but no facilities are confirmed. Confirm at least one facility before continuing.")
             st.rerun()
     with col2:
         confirmed = [facility for facility in facilities if facility.get("reviewer_confirmed") or facility.get("status") == "Confirmed"]

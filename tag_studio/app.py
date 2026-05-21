@@ -29,7 +29,7 @@ from tag_studio.storage import (
     list_memo_ids,
     storage_readiness,
 )
-from tag_studio.ui_components import show_header, show_progress
+from tag_studio.ui_components import show_header, show_progress, show_step_navigation
 
 st.set_page_config(page_title="Tag Studio", page_icon="TS", layout="wide")
 
@@ -119,6 +119,7 @@ def main() -> None:
     )
     st.session_state["selected_step"] = selected_step
     show_progress(selected_step, statuses)
+    show_step_navigation(selected_step)
     route_reviewer_page(workspace, active_memo_id, selected_step)
 
 

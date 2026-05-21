@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 from tag_studio.models import SectionDefinition
-from tag_studio.services import classify_section_review, save_section_defs, step_summary
+from tag_studio.services import (
+    accept_section,
+    accept_sections,
+    classify_section_review,
+    save_section_defs,
+    step_summary,
+)
 from tag_studio.storage import create_memo_workspace, ensure_workspace, memo_dir, save_sections, write_json
 
 
@@ -90,7 +96,7 @@ def _candidate(memo_id: str, confidence: float, section_id: str = "repayment_ana
     }
 
 
-def test_high_confidence_section_is_ready_without_manual_confirmation(tmp_path) -> None:
+def test_high_confidence_section_needs_acceptance_before_completion(tmp_path) -> None:
     workspace, memo_id = _workspace_with_memo(tmp_path)
     save_sections(workspace, memo_id, [_section("section_001")])
     write_json(memo_dir(workspace, memo_id) / "sections" / "section_candidates.json", [_candidate(memo_id, 0.92)])
@@ -100,6 +106,18 @@ def test_high_confidence_section_is_ready_without_manual_confirmation(tmp_path) 
     assert not summary.must_fix
     assert not summary.can_review_later
     assert len(summary.ready) == 1
+    assert step_summary(workspace, memo_id)["Review Memo Sections"] == "Needs Review"
+
+    assert accept_section(workspace, memo_id, "section_001")
+    assert step_summary(workspace, memo_id)["Review Memo Sections"] == "Complete"
+
+
+def test_accept_sections_bulk_accepts_ready_sections(tmp_path) -> None:
+    workspace, memo_id = _workspace_with_memo(tmp_path)
+    save_sections(workspace, memo_id, [_section("section_001")])
+    write_json(memo_dir(workspace, memo_id) / "sections" / "section_candidates.json", [_candidate(memo_id, 0.92)])
+
+    assert accept_sections(workspace, memo_id, ["section_001"]) == 1
     assert step_summary(workspace, memo_id)["Review Memo Sections"] == "Complete"
 
 
@@ -134,3 +152,15 @@ def test_duplicate_required_section_mapping_blocks_continuation(tmp_path) -> Non
 
     assert len(summary.must_fix) == 2
     assert all("duplicate_standard_section" in item.reason_codes for item in summary.must_fix)
+
+
+def test_accepted_duplicate_section_mappings_do_not_block_continuation(tmp_path) -> None:
+    workspace, memo_id = _workspace_with_memo(tmp_path)
+    save_sections(workspace, memo_id, [_section("section_001"), _section("section_002")])
+    write_json(memo_dir(workspace, memo_id) / "sections" / "section_candidates.json", [_candidate(memo_id, 0.92)])
+
+    assert accept_sections(workspace, memo_id, ["section_001", "section_002"]) == 2
+    summary = classify_section_review(workspace, memo_id)
+
+    assert not summary.must_fix
+    assert step_summary(workspace, memo_id)["Review Memo Sections"] == "Complete"

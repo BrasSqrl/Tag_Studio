@@ -9,7 +9,7 @@ from uuid import uuid4
 from .app_config import STATUS_LABELS
 from .defaults import DEFAULT_OUTCOME_EVENT_TYPES, SCHEMA_VERSION
 from .document_intelligence import load_extraction_warnings, load_page_quality, load_page_text, load_section_candidates
-from .models import SectionDefinition, TagDefinition
+from .models import FacilityRecord, SectionDefinition, TagDefinition
 from .sectioning import propose_section_candidates, propose_sections, required_section_gaps
 from .storage import (
     active_schema_hash,
@@ -31,6 +31,7 @@ from .storage import (
     read_json,
     save_review,
     save_sections,
+    slugify,
     write_json,
 )
 
@@ -111,6 +112,34 @@ class SectionCleanupBlock:
     ordinal: int
 
 
+def facility_review_rows_to_records(memo_id: str, customer_id: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    saved: list[dict[str, Any]] = []
+    for row in rows:
+        name = str(row.get("Facility Name") or "").strip()
+        if not name:
+            continue
+        status = str(row.get("Status") or "Confirmed").strip()
+        if status not in {"Proposed", "Confirmed", "Rejected"}:
+            status = "Confirmed"
+        if status == "Proposed":
+            status = "Confirmed"
+        saved.append(
+            FacilityRecord(
+                facility_id=slugify(str(row.get("_facility_id") or f"facility_{name}")),
+                memo_id=memo_id,
+                customer_id=customer_id,
+                facility_name=name,
+                facility_type=str(row.get("Facility Type") or "Other"),
+                amount=str(row.get("Amount") or ""),
+                closing_date=str(row.get("Facility Closing Date") or ""),
+                source_evidence=str(row.get("Why Suggested") or ""),
+                reviewer_confirmed=status == "Confirmed",
+                status=status,  # type: ignore[arg-type]
+            ).model_dump()
+        )
+    return saved
+
+
 def load_section_defs(workspace: Path) -> list[SectionDefinition]:
     return [SectionDefinition(**row) for row in read_json(config_path(workspace, "section_schema.json"), [])]
 
@@ -172,6 +201,57 @@ def record_schema_change(workspace: Path, reason: str) -> None:
 
 def section_defs_by_id(workspace: Path) -> dict[str, SectionDefinition]:
     return {section.section_id: section for section in load_section_defs(workspace)}
+
+
+def accept_section(workspace: Path, memo_id: str, section_id: str) -> bool:
+    sections = load_sections(workspace, memo_id)
+    updated: list[dict[str, Any]] = []
+    accepted = False
+    accepted_section: dict[str, Any] = {}
+    for section in sections:
+        if section.get("section_id") == section_id:
+            accepted_section = {**section, "reviewer_confirmed": True}
+            updated.append(accepted_section)
+            accepted = True
+        else:
+            updated.append(section)
+    if not accepted:
+        return False
+    save_sections(workspace, memo_id, updated)
+    append_audit(
+        workspace,
+        memo_id,
+        "section_accepted",
+        {
+            "section_id": section_id,
+            "standard_section": accepted_section.get("canonical_section_name", ""),
+            "original_heading": accepted_section.get("original_header", ""),
+        },
+    )
+    return True
+
+
+def accept_sections(workspace: Path, memo_id: str, section_ids: list[str]) -> int:
+    section_id_set = {section_id for section_id in section_ids if section_id}
+    if not section_id_set:
+        return 0
+    sections = load_sections(workspace, memo_id)
+    accepted_count = 0
+    updated: list[dict[str, Any]] = []
+    for section in sections:
+        if section.get("section_id") in section_id_set and not section.get("reviewer_confirmed"):
+            section = {**section, "reviewer_confirmed": True}
+            accepted_count += 1
+        updated.append(section)
+    if accepted_count:
+        save_sections(workspace, memo_id, updated)
+        append_audit(
+            workspace,
+            memo_id,
+            "sections_accepted",
+            {"section_count": accepted_count},
+        )
+    return accepted_count
 
 
 def load_learned_heading_matches(workspace: Path) -> dict[str, list[str]]:
@@ -554,7 +634,7 @@ def classify_section_review(
         if not section.get("reviewer_confirmed") and candidate and confidence < confidence_threshold:
             reason_codes.append("low_confidence_match")
             reasons.append(f"Suggested match confidence is {int(confidence * 100)}%, below the {int(confidence_threshold * 100)}% review threshold.")
-        if duplicate_counts.get(canonical_id, 0) > 1 and canonical_id:
+        if not section.get("reviewer_confirmed") and duplicate_counts.get(canonical_id, 0) > 1 and canonical_id:
             reason_codes.append("duplicate_standard_section")
             reasons.append(f"More than one detected section maps to {section.get('canonical_section_name', canonical_id)}.")
         if _section_has_suspicious_boundary(section):
@@ -633,7 +713,8 @@ def step_summary(workspace: Path, memo_id: str | None) -> dict[str, str]:
 
     quality_complete = text_quality_complete(workspace, memo_id)
     section_review = classify_section_review(workspace, memo_id) if sections else SectionReviewSummary([], [], [])
-    sections_complete = bool(sections) and quality_complete and not section_review.has_blockers
+    sections_accepted = bool(sections) and all(section.get("reviewer_confirmed") for section in sections)
+    sections_complete = bool(sections) and quality_complete and not section_review.has_blockers and sections_accepted
     facilities = load_facilities(workspace, memo_id)
     outcome_summaries = load_outcome_summaries(workspace, memo_id)
     confirmed_facilities = [facility for facility in facilities if facility.get("status") == "Confirmed" or facility.get("reviewer_confirmed")]

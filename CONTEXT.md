@@ -217,8 +217,20 @@ A section condition that requires reviewer attention before tagging can proceed.
 _Avoid_: Every section, routine match
 
 **Ready Section**:
-A detected section whose Standard Memo Section mapping is high-confidence and does not have missing-required, duplicate, suspicious-boundary, or text-quality exceptions. Ready Sections can be reviewed in a collapsed view but should not interrupt the normal workflow.
+A detected section whose Standard Memo Section mapping is high-confidence and does not have missing-required, duplicate, suspicious-boundary, or text-quality exceptions. Ready Sections can be accepted individually or in bulk, but they still require Section Acceptance before the memo can continue to facility setup.
 _Avoid_: Approved section, ignored section
+
+**Section Acceptance**:
+The reviewer confirmation that a detected section's Original Memo Heading and section text belong under the displayed Standard Memo Section. Section Acceptance is a data-quality workflow action, not credit approval or underwriting approval. Section Acceptance can resolve duplicate Standard Memo Section warnings when the reviewer intends multiple detected text blocks to remain under the same Standard Memo Section.
+_Avoid_: Credit approval, section signoff
+
+**Accept This Section**:
+The reviewer action that records Section Acceptance for one detected section. It should be visible near the top of each section card in Review Memo Sections.
+_Avoid_: Approve section, sign off credit
+
+**Accept All Looks Good Sections**:
+The bulk reviewer action that records Section Acceptance for high-confidence Ready Sections only. It should not accept sections that need correction, missing-section decisions, or cleanup.
+_Avoid_: Bulk approve, skip review
 
 **Section Exception Resolution**:
 The one-card-at-a-time action that resolves a Section Review Exception by accepting a suggestion, changing the Standard Memo Section, marking a missing section, merging sections, splitting a section, or saving corrected section status. Each resolution saves immediately and removes that exception from the normal review queue.

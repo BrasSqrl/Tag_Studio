@@ -138,6 +138,25 @@ def show_progress(current_step: str, statuses: dict[str, str]) -> None:
     st.markdown(f'<div class="progress-wrap">{"".join(cards)}</div>', unsafe_allow_html=True)
 
 
+def show_step_navigation(current_step: str) -> None:
+    current_index = WIZARD_STEPS.index(current_step)
+    prev_step = WIZARD_STEPS[current_index - 1] if current_index > 0 else None
+    next_step = WIZARD_STEPS[current_index + 1] if current_index < len(WIZARD_STEPS) - 1 else None
+    spacer, back_col, next_col = st.columns([6, 1, 1])
+    with spacer:
+        st.empty()
+    with back_col:
+        if prev_step and st.button("Back", key=f"wizard_back_{current_step}", use_container_width=True):
+            go_to_step(prev_step)
+        elif not prev_step:
+            st.button("Back", key=f"wizard_back_disabled_{current_step}", disabled=True, use_container_width=True)
+    with next_col:
+        if next_step and st.button("Next", key=f"wizard_next_{current_step}", type="primary", use_container_width=True):
+            go_to_step(next_step)
+        elif not next_step:
+            st.button("Next", key=f"wizard_next_disabled_{current_step}", disabled=True, use_container_width=True)
+
+
 def go_to_step(step: str) -> None:
     st.session_state["_pending_review_step"] = step
     st.session_state["selected_step"] = step
